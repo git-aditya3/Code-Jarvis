@@ -10,7 +10,7 @@
 # pip install mss pytesseract pillow pyqt6 openai requests pywin32
 # Tesseract: https://github.com/UB-Mannheim/tesseract/wiki
 # ──────────────────────────────────────────────────────────────────────────────
-import sys, os, time, re, json, difflib, threading, textwrap, tempfile
+import sys, os, time, re, json, difflib, threading, textwrap, tempfile, argparse
 import numpy as np
 import pandas as pd
 import requests
@@ -1095,6 +1095,30 @@ class AssistantWindow(QWidget):
 # ── Entry Point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Code Assistant (GUI or CLI)")
+    parser.add_argument("--cli", action="store_true", help="Run one-shot headless OCR and exit")
+    parser.add_argument("--llm", action="store_true", help="Call LLM in CLI mode (requires API keys)")
+    args = parser.parse_args()
+
+    if args.cli:
+        # headless one-shot: check tesseract, run OCR, print results
+        if not os.path.exists(TESSERACT_CMD):
+            print(f"Tesseract not found at: {TESSERACT_CMD}")
+            sys.exit(1)
+        # one-shot run
+        pil = screenshot_to_pil()
+        raw = ocr_image(pil)
+        code = extract_code_blocks(raw)
+        lang = detect_language(code)
+        print("Detected language:", lang)
+        print("--- Extracted code (first 2000 chars) ---")
+        print(code[:2000])
+        if args.llm:
+            print("\nCalling LLM (this may require configured API keys)...")
+            res = call_llm(code)
+            print(json.dumps(res, indent=2, ensure_ascii=False))
+        sys.exit(0)
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
