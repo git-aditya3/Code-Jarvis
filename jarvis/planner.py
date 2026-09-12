@@ -180,7 +180,7 @@ def _workspace(match: re.Match) -> tuple[str, dict[str, Any]]:
     return "switch_desktop", {"number": match.group("number")}
 
 
-@_rule(r"^move\s+(?!(?:the\s+)?(?:mouse|pointer|cursor)\b)(?P<title>.+?)\s+to\s+"
+@_rule(r"^move\s+(?!(?:(?:my|the)\s+)?(?:mouse|pointer|cursor)\b)(?P<title>.+?)\s+to\s+"
        r"(?P<x>\d{1,5})\s*[, ]\s*(?P<y>\d{1,5})"
        r"(?:\s+(?P<width>\d{2,5})\s*[x×]\s*(?P<height>\d{2,5}))?$")
 def _move_window(match: re.Match) -> tuple[str, dict[str, Any]]:
@@ -247,6 +247,8 @@ def _click_text(match: re.Match) -> tuple[str, dict[str, Any]] | None:
     return "click_on_screen", {"text": text}
 
 
+@_rule(r"^(?:where(?:'s| is))\s+(?P<text>.+?)\s+"
+       r"(?:button|icon|menu|tab|link|option|checkbox|field|box|bar|label)$")
 @_rule(r"^(?:where(?:'s| is)|find|locate)\s+(?P<text>.+?)\s+on\s+(?:my\s+|the\s+)?screen$")
 def _find_on_screen(match: re.Match) -> tuple[str, dict[str, Any]]:
     return "find_on_screen", {"text": match.group("text").strip()}
@@ -331,6 +333,24 @@ def _brightness_nudge(match: re.Match) -> tuple[str, dict[str, Any]]:
     return "nudge_brightness", {"delta": amount}
 
 
+BARE_DOMAIN = re.compile(
+    r"^(?P<host>[\w-]+(?:\.[\w-]+)*\.(?:com|org|net|io|dev|ai|co|in|uk|me|app|sh|xyz|"
+    r"edu|gov|store|site|online|tech))(?:/(?P<path>\S*))?$", re.IGNORECASE)
+
+
+@_rule(r"^open\s+(?:the\s+|my\s+)?(?:folder|directory|dir)\s+(?P<path>.+)$")
+def _open_folder(match: re.Match) -> tuple[str, dict[str, Any]]:
+    return "open_path", {"path": _clean_target(match.group("path"))}
+
+
+@_rule(r"^open\s+(?P<host>[\w-]+\.[\w.-]*[a-z]{2,}(?:/\S*)?)$")
+def _open_domain(match: re.Match) -> tuple[str, dict[str, Any]] | None:
+    host = match.group("host")
+    if not BARE_DOMAIN.match(host):
+        return None
+    return "open_url", {"url": "https://" + host}
+
+
 @_rule(r"^(?:please\s+)?(?:open|launch|start|run)\s+(?:up\s+)?(?:the\s+|my\s+)?"
        r"(?P<target>.+?)(?:\s+(?:app|application|program))?$")
 def _open(match: re.Match) -> tuple[str, dict[str, Any]] | None:
@@ -382,7 +402,7 @@ def _switch(_match: re.Match) -> tuple[str, dict[str, Any]]:
     return "switch_window", {}
 
 
-@_rule(r"^(?:what(?:'s| is)? (?:open|running)(?: right now)?|list (?:the )?windows|"
+@_rule(r"^(?:what(?:'s| is)?\s+open(?: right now)?|list (?:the )?windows|"
        r"show (?:me )?(?:the )?open windows)$")
 def _windows(_match: re.Match) -> tuple[str, dict[str, Any]]:
     return "list_windows", {}
@@ -394,22 +414,22 @@ def _active(_match: re.Match) -> tuple[str, dict[str, Any]]:
 
 
 # ── audio and display ───────────────────────────────────────────────────────
-@_rule(r"^(?:mute|silence)(?:\s+(?:the\s+)?(?:sound|audio|volume|pc|computer|it))?$")
-def _mute(_match: re.Match) -> tuple[str, dict[str, Any]]:
-    return "set_volume", {"mute": "on"}
+@_rule(r"^(?:mute|silence)(?:\s+(?:the\s+)?(?:sound|audio|speakers?|volume|pc|computer|it))?$")
+def _mute_action(_match: re.Match) -> tuple[str, dict[str, Any]]:
+    return "mute_control", {"action": "on"}
 
 
-@_rule(r"^unmute(?:\s+(?:it|the\s+sound|the\s+audio))?$")
-def _unmute(_match: re.Match) -> tuple[str, dict[str, Any]]:
-    return "set_volume", {"mute": "off"}
+@_rule(r"^unmute(?:\s+(?:it|the\s+sound|the\s+audio|the\s+speakers?))?$")
+def _unmute_action(_match: re.Match) -> tuple[str, dict[str, Any]]:
+    return "mute_control", {"action": "off"}
 
 
-@_rule(r"^toggle\s+mute$")
-def _mute_toggle(_match: re.Match) -> tuple[str, dict[str, Any]]:
-    return "set_volume", {"mute": "toggle"}
+@_rule(r"^(?:toggle|flip)\s+(?:the\s+)?mute$")
+def _toggle_mute_action(_match: re.Match) -> tuple[str, dict[str, Any]]:
+    return "mute_control", {"action": "toggle"}
 
 
-@_rule(r"^(?:what(?:'s| is)?(?: the)? volume|volume level|how loud is it)$")
+@_rule(r"^(?:what(?:'s| is)?(?: my| the)? volume(?: level)?|volume level|how loud is it)$")
 def _get_volume(_match: re.Match) -> tuple[str, dict[str, Any]]:
     return "get_volume", {}
 
@@ -417,6 +437,9 @@ def _get_volume(_match: re.Match) -> tuple[str, dict[str, Any]]:
 @_rule(r"^(?:volume|sound)\s+(?P<direction>up|down|louder|quieter|higher|lower)"
        r"(?:\s+(?:by\s+)?(?P<amount>\d{1,3}))?$")
 @_rule(r"^(?:turn\s+(?:it|the\s+volume)\s+)(?P<direction>up|down|louder|quieter)$")
+@_rule(r"^(?:turn\s+(?:the\s+)?volume|set\s+(?:the\s+)?volume)\s+"
+       r"(?P<direction>up|down|louder|quieter|higher|lower)\s+by\s+(?P<amount>\d{1,3})$")
+@_rule(r"^(?:make\s+(?:it|the\s+volume)\s+)(?P<direction>louder|quieter)$")
 def _volume_nudge(match: re.Match) -> tuple[str, dict[str, Any]]:
     step = int(match.groupdict().get("amount") or 10)
     direction = match.group("direction")
@@ -435,7 +458,7 @@ def _volume(match: re.Match) -> tuple[str, dict[str, Any]] | None:
     return "set_volume", {"level": max(0, min(100, level))}
 
 
-@_rule(r"^(?:what(?:'s| is)?(?: the)? brightness|screen brightness)$")
+@_rule(r"^(?:what(?:'s| is)?(?: (?:the|my))? brightness(?: level)?|screen brightness)$")
 def _get_brightness(_match: re.Match) -> tuple[str, dict[str, Any]]:
     return "get_brightness", {}
 
@@ -468,7 +491,23 @@ def _type_into(match: re.Match) -> tuple[str, dict[str, Any]]:
                          "target": _clean_title(match.group("target"))}
 
 
-@_rule(r"^(?:type|write|enter|say)\s+(?P<text>.+)$")
+@_rule(r"^say\s+(?P<text>.+)$")
+@_rule(r"^(?:speak|read)\s+(?:out\s+)?(?:loud\s+)?(?P<text>(?:this|that|it|the following)[:,]?\s+.+)$")
+def _speak(match: re.Match) -> tuple[str, dict[str, Any]]:
+    return "speak", {"text": match.group("text").strip()}
+
+
+@_rule(r"^(?:save|overwrite)\s+(?P<text>.+?)\s+(?:to|into|onto|in)\s+(?P<path>[\w./~\\-]+\.\w{1,6})$")
+def _overwrite_file(match: re.Match) -> tuple[str, dict[str, Any]]:
+    return "write_file", {"path": match.group("path"), "content": match.group("text").strip()}
+
+
+@_rule(r"^write\s+(?P<text>.+?)\s+(?:to|into|onto)\s+(?P<path>[\w./~\\-]+\.\w{1,6})$")
+def _write_to_file(match: re.Match) -> tuple[str, dict[str, Any]]:
+    return "append_file", {"path": match.group("path"), "content": match.group("text").strip()}
+
+
+@_rule(r"^(?:type|write|enter)\s+(?P<text>.+)$")
 def _type(match: re.Match) -> tuple[str, dict[str, Any]]:
     text = re.sub(r"^(?:this|out|the following)\s*[:,-]?\s*", "", match.group("text"),
                   flags=re.IGNORECASE)
@@ -496,13 +535,13 @@ def _click(match: re.Match) -> tuple[str, dict[str, Any]]:
     return "click", {"button": button, "clicks": min(clicks, 3)}
 
 
-@_rule(r"^move\s+(?:the\s+)?(?:mouse|pointer|cursor)\s+(?:to\s+)?"
+@_rule(r"^move\s+(?:(?:my|the)\s+)?(?:mouse|pointer|cursor)\s+(?:to\s+)?"
        r"(?P<x>-?\d{1,5})\s*[, ]\s*(?P<y>-?\d{1,5})$")
 def _move(match: re.Match) -> tuple[str, dict[str, Any]]:
     return "move_mouse", {"x": int(match.group("x")), "y": int(match.group("y"))}
 
 
-@_rule(r"^(?:where(?:'s| is) (?:the )?(?:mouse|pointer|cursor)|pointer position)$")
+@_rule(r"^(?:where(?:'s| is)\s+(?:(?:my|the)\s+)?(?:mouse|pointer|cursor)|pointer position)$")
 def _pointer(_match: re.Match) -> tuple[str, dict[str, Any]]:
     return "pointer_position", {}
 
@@ -551,7 +590,8 @@ def _copy(match: re.Match) -> tuple[str, dict[str, Any]]:
                          "destination": _clean_target(match.group("destination"))}
 
 
-@_rule(r"^(?:move|rename)\s+(?P<source>.+?)\s+(?:to|into|as)\s+(?P<destination>.+)$")
+@_rule(r"^(?:move|rename)\s+(?!(?:(?:my|the)\s+)?(?:mouse|pointer|cursor)\b)"
+       r"(?P<source>.+?)\s+(?:to|into|as)\s+(?P<destination>.+)$")
 def _move(match: re.Match) -> tuple[str, dict[str, Any]]:
     return "move_path", {"source": _clean_target(match.group("source")),
                          "destination": _clean_target(match.group("destination"))}
@@ -720,6 +760,104 @@ def _empty_trash(_match: re.Match) -> tuple[str, dict[str, Any]]:
 @_rule(r"^(?:start|show)\s+(?:the\s+)?screen\s?saver$")
 def _screensaver(_match: re.Match) -> tuple[str, dict[str, Any]]:
     return "power", {"action": "screensaver"}
+
+
+@_rule(r"^(?:search|google|look\s+up)\s+(?!my\s+(?:notes|memory|tasks|todos|files)\b)"
+       r"(?:the\s+web\s+|web\s+|online\s+)?(?:for\s+)?(?P<query>.+)$")
+@_rule(r"^(?P<engine>google|duckduckgo|bing)\s+(?P<query>.+)$")
+@_rule(r"^search\s+(?P<engine>youtube|wikipedia|github|amazon|reddit|stack\s?overflow|maps|bing)\s+"
+       r"(?:for\s+)?(?P<query>.+)$")
+def _web_search(match: re.Match) -> tuple[str, dict[str, Any]] | None:
+    query = match.group("query").strip(" ?.!")
+    if not query or query.lower() in ("the web", "online"):
+        return None
+    groups = match.groupdict()
+    engine = (groups.get("engine") or "").lower().replace("  ", " ")
+    return "web_search", {"query": query, "engine": engine or "google"}
+
+
+# ── assistant primitives the long tail does not cover ──────────────────────
+@_rule(r"^(?:ask|tell)\s+me\s+(?P<prompt>for\s+.+|about\s+.+|what\s+.+|which\s+.+|"
+       r"where\s+.+|who\s+.+|how\s+.+)$")
+def _ask_user(match: re.Match) -> tuple[str, dict[str, Any]]:
+    prompt = match.group("prompt").strip().strip("?.!")
+    return "ask_user", {"prompt": prompt[:1].upper() + prompt[1:] + "?"}
+
+
+@_rule(r"^ask\s+yourself\s+(?:to\s+)?(?P<text>.+)$")
+@_rule(r"^use\s+your\s+(?P<skill>[\w-]+)\s+skill\s+(?:to\s+|for\s+)?(?P<text>.+)$")
+def _run_skill(match: re.Match) -> tuple[str, dict[str, Any]]:
+    groups = match.groupdict()
+    text = (groups.get("text") or "").strip().strip("?.!")
+    text = re.sub(r"^what\s+the\s+(?P<thing>.+?)\s+is$", r"what is the \g<thing>", text)
+    return "run_skill", {"text": text or "help"}
+
+
+# ── windows, processes, clipboard, lists: the long tail ────────────────────
+@_rule(r"^(?:what|which)\s+windows?\s+(?:are\s+)?(?:open|running|on\s+screen)(?:\s+right\s+now)?$")
+@_rule(r"^(?:list|show)\s+(?:me\s+)?(?:my\s+|the\s+)?(?:open\s+)?windows?$")
+def _windows_alt(_match: re.Match) -> tuple[str, dict[str, Any]]:
+    return "list_windows", {}
+
+
+@_rule(r"^(?:what|which)\s+(?:window|app|application|program)\s+is\s+"
+       r"(?:active|focused|in\s+front|on\s+top)$")
+def _active_alt(_match: re.Match) -> tuple[str, dict[str, Any]]:
+    return "active_window", {}
+
+
+@_rule(r"^(?:what|which)\s+processes?\s+(?:are\s+)?(?:running|open|alive)\??$")
+@_rule(r"^(?:list|show)\s+(?:me\s+)?(?:my\s+|the\s+)?(?:running\s+)?(?:processes|tasks)$")
+@_rule(r"^what(?:'s| is)\s+(?:using|eating)\s+(?:the\s+)?(?:most\s+)?(?:memory|cpu|ram)$")
+def _processes(_match: re.Match) -> tuple[str, dict[str, Any]]:
+    return "list_processes", {"limit": 12}
+
+
+@_rule(r"^(?:find|locate|look\s+for|search\s+for)\s+(?:the\s+)?(?P<name>[\w. -]+?)\s+process$")
+@_rule(r"^is\s+(?P<name>[\w. -]+?)\s+(?:process\s+)?(?:running|open|alive)\??$")
+def _find_process(match: re.Match) -> tuple[str, dict[str, Any]] | None:
+    name = _clean_target(match.group("name"))
+    return ("find_process", {"name": name}) if name else None
+
+
+@_rule(r"^(?:what(?:'s| is)\s+(?:on\s+|in\s+)?(?:my\s+|the\s+)?clipboard|read\s+(?:my\s+|the\s+)?clipboard)$")
+@_rule(r"^clipboard(?:\s+contents)?$")
+def _clipboard_read(_match: re.Match) -> tuple[str, dict[str, Any]]:
+    return "clipboard_read", {}
+
+
+@_rule(r"^(?:forget|clear|delete|wipe|empty)\s+(?:my\s+|the\s+)?clipboard(?:\s+history)?$")
+def _clipboard_forget(_match: re.Match) -> tuple[str, dict[str, Any]]:
+    return "clipboard_forget", {}
+
+
+@_rule(r"^(?:put\s+back|restore|paste\s+back)\s+(?:what\s+i\s+copied|my\s+clipboard|"
+       r"the\s+clipboard)(?:\s+before)?$")
+def _clipboard_restore(_match: re.Match) -> tuple[str, dict[str, Any]]:
+    return "clipboard_restore", {"index": 1}
+
+
+# Named lists: “add milk to my shopping list” needs no path at all.
+NAMED_LISTS = {
+    "todo": "todo.md", "to do": "todo.md", "to-do": "todo.md", "task list": "todo.md",
+    "shopping": "shopping-list.md", "shopping list": "shopping-list.md",
+    "notes": "notes.md", "note": "notes.md", "journal": "journal.md", "diary": "journal.md",
+    "ideas": "ideas.md", "ideas list": "ideas.md", "wishlist": "wishlist.md",
+    "wish list": "wishlist.md", "reading list": "reading-list.md",
+}
+
+
+@_rule(r"^(?:add|append|put)\s+(?P<content>.+?)\s+(?:to|on|in)\s+(?:my\s+|the\s+)?"
+       r"(?P<name>[\w -]+?)(?:\s+list)?$")
+def _append_named_list(match: re.Match) -> tuple[str, dict[str, Any]] | None:
+    from pathlib import Path
+
+    name = match.group("name").strip().lower()
+    for candidate, filename in NAMED_LISTS.items():
+        if name == candidate or name == candidate + " list":
+            return "append_file", {"path": str(Path.home() / filename),
+                                   "content": match.group("content").strip()}
+    return None
 
 
 # ════════════════════════════════════════════════════════════════════════════

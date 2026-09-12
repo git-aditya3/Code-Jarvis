@@ -208,8 +208,44 @@ class ControlSkill(_ControlBase):
         (r"^(?:open|start|launch)\s+(?:a\s+|the\s+)?(?:terminal|shell|console|command\s+prompt)$", 0.97),
         (r"^(?:what\s+did\s+i\s+copy(?:\s+earlier)?|clipboard\s+history|"
          r"show\s+(?:me\s+)?(?:my\s+)?clipboard\s+history)$", 0.96),
-        (r"^(?:put\s+back|restore)\s+(?:what\s+i\s+copied|my\s+clipboard|the\s+clipboard)$", 0.95),
+        (r"^(?:put\s+back|restore|paste\s+back)\s+(?:what\s+i\s+copied|my\s+clipboard|"
+         r"the\s+clipboard)(?:\s+before)?$", 0.95),
         (r"^(?:what|which)\s+shortcuts?\s+(?:do\s+you|are\s+there|can\s+i)", 0.96),
+        # ── the long tail: windows, processes, clipboard, lists ──────────
+        (r"^(?:what|which)\s+windows?\s+(?:are\s+)?(?:open|running)\b", 0.93),
+        (r"^(?:list|show)\s+(?:me\s+)?(?:my\s+|the\s+)?(?:open\s+)?windows?$", 0.93),
+        (r"^(?:what|which)\s+(?:window|app|application|program)\s+is\s+"
+         r"(?:active|focused|in\s+front|on\s+top)\b", 0.93),
+        (r"^(?:what|which)\s+processes?\b|^what(?:'s| is)\s+using\s+"
+         r"(?:the\s+)?(?:most\s+)?(?:memory|cpu|ram)\b", 0.92),
+        (r"^(?:find|locate|look\s+for)\s+(?:the\s+)?\S+\s+process$", 0.93),
+        (r"^(?:what(?:'s| is)\s+(?:on\s+|in\s+)?(?:my\s+|the\s+)?clipboard|read\s+my\s+clipboard|"
+         r"clipboard)$", 0.95),
+        (r"^(?:forget|clear|delete|wipe)\s+(?:my\s+|the\s+)?clipboard", 0.94),
+        (r"^(?:where(?:'s| is))\s+.+\s+(?:button|icon|menu|tab|link|option|item|checkbox|"
+         r"field|box|bar|label)\b", 0.93),
+        (r"^(?:write|append|add|put)\s+.+\s+(?:to|into|onto)\s+"
+         r"(?:~/|/|[\w-]+\.\w{1,6}$|(?:my|the)\s+\w+\s+list$)", 0.92),
+        (r"^(?:open|start|launch)\s+(?:the\s+|my\s+)?(?:folder|directory|dir)\s+\S", 0.94),
+        (r"^(?:open|launch|start|run)\s+[\w-]+\.[a-z]{2,}(?:/\S*)?$", 0.93),
+        (r"^(?:say|speak)\s+(?!that\b|this\b|it\b)\S", 0.92),
+        (r"^(?:is|are)\s+\S+\s+(?:process\s+)?(?:running|open|alive)\b", 0.92),
+        (r"^(?:what(?:'s| is)\s+)?(?:my\s+|the\s+)?brightness(?:\s+level)?$", 0.93),
+        (r"^(?:mute|unmute|toggle\s+mute)$", 0.94),
+        (r"^(?:search|google|look\s+up)\s+(?!my\s+(?:notes|memory|tasks|todos|files)\b)"
+         r"(?:the\s+web\s+|web\s+|online\s+)?(?:for\s+)?\S", 0.92),
+        (r"^(?:duckduckgo|bing)\s+\S", 0.92),
+        # ── path verbs, questions and small utilities ────────────────────
+        (r"^(?:delete|remove|trash)\s+(?:the\s+)?[~/.]|^(?:delete|remove|trash)\s+\S+\.\w{1,6}$",
+         0.95),
+        (r"^(?:zip|compress|archive|extract|unzip|unpack|duplicate)\s+\S", 0.94),
+        (r"^(?:save|overwrite|write|append|add)\s+.+\s+(?:to|into|onto)\s+\S+\.\w{1,6}$",
+         0.93),
+        # “ask me for X” is a prompt; “tell me a story” is a conversation.
+        (r"^(?:ask|tell)\s+(?:me|yourself)\s+(?:for|to|what|which|where|who|how|about)\b", 0.90),
+        (r"^next\s+window$|^switch\s+windows?$", 0.94),
+        (r"^where(?:'s| is| are)\s+(?:(?:my|the)\s+)?(?:pointer|mouse|cursor)", 0.94),
+        (r"^(?:what(?:'s| is)\s+)?(?:the\s+)?volume(?:\s+level)?\??$", 0.94),
     )
 
     def match(self, text: str) -> float:

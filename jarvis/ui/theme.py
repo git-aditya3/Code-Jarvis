@@ -218,4 +218,56 @@ def stylesheet(accent: str = "cyan") -> str:
     QMenu::item {{ padding: 6px 18px; border-radius: 6px; }}
     QMenu::item:selected {{ background: {a['accent_dim']}; }}
     QSplitter::handle {{ background: {BASE['border_soft']}; width: 1px; }}
+
+    /* ── modern panels: cards, tiles, pills, palette ─────────────────── */
+    #Card {{
+        background: {BASE['panel']};
+        border: 1px solid {BASE['border_soft']};
+        border-radius: 12px;
+    }}
+    #Card QLabel#CardTitle, QLabel#CardTitle {{
+        color: {a['accent_soft']};
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 2px;
+    }}
+    #Card QTextBrowser#CardBody {{
+        background: {BASE['panel_alt']};
+        border: 1px solid {BASE['border_soft']};
+        border-radius: 9px;
+    }}
+    QLabel#Body {{ color: {BASE['text']}; }}
+    #Tile {{
+        background: {BASE['panel_alt']};
+        border: 1px solid {BASE['border']};
+        border-radius: 12px;
+        min-width: 130px;
+    }}
+    #Tile[tone="accent"] {{ border-color: {a['accent_dim']}; }}
+    #Tile[tone="ok"] {{ border-color: {BASE['ok']}; }}
+    #Tile[tone="warn"] {{ border-color: {BASE['warn']}; }}
+    #Tile[tone="info"] {{ border-color: {BASE['user']}; }}
+    QLabel#TileValue {{ font-size: 22px; font-weight: 700; color: {BASE['text']}; }}
+    QLabel#TileValue[tone="accent"] {{ color: {a['accent']}; }}
+    QLabel#TileValue[tone="ok"] {{ color: {BASE['ok']}; }}
+    QLabel#TileValue[tone="warn"] {{ color: {BASE['warn']}; }}
+    QLabel#TileValue[tone="info"] {{ color: {BASE['user']}; }}
+    QLabel#TileLabel {{ color: {BASE['muted']}; font-size: 10px; letter-spacing: 2px; }}
+    QLabel#Pill {{
+        border-radius: 11px;
+        padding: 4px 10px;
+        font-size: 12px;
+        background: {BASE['panel_alt']};
+        border: 1px solid {BASE['border']};
+        color: {BASE['muted']};
+    }}
+    QLabel#Pill[tone="ok"] {{ color: {BASE['ok']}; border-color: {BASE['ok']}; }}
+    QLabel#Pill[tone="info"] {{ color: {BASE['user']}; border-color: {BASE['border']}; }}
+    QLabel#Pill[tone="muted"] {{ color: {BASE['dim']}; }}
+    QLabel#HourCell {{ font-size: 10px; color: {BASE['dim']}; }}
+    #Palette {{ background: {BASE['bg']}; border: 1px solid {a['accent_dim']}; border-radius: 12px; }}
+    #Palette QListWidget {{ background: {BASE['panel']}; border: 1px solid {BASE['border_soft']}; }}
+    #Palette QListWidget::item {{ padding: 8px 10px; }}
+    QScrollArea {{ background: transparent; border: none; }}
+    QScrollArea > QWidget > QWidget {{ background: transparent; }}
     """
