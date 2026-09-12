@@ -40,7 +40,10 @@ pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
 LLM_PROVIDER   = "groq"            # "groq" | "openai" | "ollama"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_KEY")
 OPENAI_MODEL   = "gpt-4o-mini"     # cheap and fast
-GROQ_API_KEY   = os.getenv("GROQ_API_KEY", "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")  # get one free at https://console.groq.com/keys
+# NOTE: the key that used to be hard-coded here was a live credential in a
+# public repository — it must be revoked at https://console.groq.com/keys.
+# This legacy script now reads the key from the environment only.
+GROQ_API_KEY   = os.getenv("GROQ_API_KEY", "")  # get one free at https://console.groq.com/keys
 GROQ_MODEL     = "llama-3.1-70b-versatile"
 OLLAMA_MODEL   = "codellama"       # for local Ollama
 OLLAMA_URL     = "http://localhost:11434/api/chat"

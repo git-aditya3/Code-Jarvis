@@ -1,0 +1,35 @@
+# JARVIS core requirements.
+#
+#   pip install -r requirements.txt
+#
+# Everything below is optional to a degree: JARVIS runs with no third-party
+# packages at all (offline skills + CLI), and each line unlocks one capability.
+# `python run_jarvis.py --doctor` tells you exactly what is missing.
+
+# Desktop interface (the main window)
+PyQt6>=6.5
+
+# Language-model brain (Groq, OpenAI and Ollama all speak HTTPS) + weather + Wikipedia
+requests>=2.28
+
+# CPU / memory / disk / battery detail in the System skill
+psutil>=5.9
+
+# ── Speech out ──────────────────────────────────────────────────────────────
+# Windows/macOS/Linux native text-to-speech. PyQt6's QtTextToSpeech and the OS
+# `say`/`espeak` commands are used as automatic fallbacks.
+pyttsx3>=2.90
+
+# ── Speech in (microphone + wake word) ──────────────────────────────────────
+# Offline recognition, no API key and no cloud calls.
+sounddevice>=0.4.6
+faster-whisper>=1.0
+
+# ── Screenshots ─────────────────────────────────────────────────────────────
+# PyQt6 covers the primary path; these add multi-monitor support.
+pillow>=10.0
+mss>=9.0
+
+# ── Diagrams ────────────────────────────────────────────────────────────────
+# Mermaid output needs nothing; this enables PNG rendering of flowcharts.
+graphviz>=0.20

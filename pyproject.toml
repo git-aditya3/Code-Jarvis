@@ -1,0 +1,104 @@
+[project]
+name = "code-jarvis"
+version = "1.0.0"
+description = "JARVIS — a local-first voice personal assistant and code-review copilot"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "git-aditya3" }]
+keywords = ["assistant", "jarvis", "voice", "code-review", "synthetic-data", "offline"]
+classifiers = [
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Desktop Environment",
+    "Topic :: Software Development :: Quality Assurance",
+]
+
+# Plotting the dependency split is the point: the assistant works with nothing
+# installed, and every optional extra unlocks a capability.
+dependencies = []
+
+[project.optional-dependencies]
+# the desktop interface
+gui = ["PyQt6>=6.5"]
+# the language-model brain (Groq / OpenAI / Ollama all speak HTTPS)
+llm = ["requests>=2.28"]
+# note-taking extras used by system, weather and network skills
+system = ["psutil>=5.9"]
+# speech out
+voice-out = ["pyttsx3>=2.90"]
+# speech in + wake word, fully offline
+voice-in = ["sounddevice>=0.4.6", "faster-whisper>=1.0"]
+# screenshot fallback (PyQt6 already covers the primary path)
+capture = ["pillow>=10.0", "mss>=9.0"]
+# rendering flowcharts to PNG
+diagrams = ["graphviz>=0.20"]
+# everything a normal user wants
+all = [
+    "PyQt6>=6.5",
+    "requests>=2.28",
+    "psutil>=5.9",
+    "pyttsx3>=2.90",
+    "sounddevice>=0.4.6",
+    "faster-whisper>=1.0",
+    "pillow>=10.0",
+    "mss>=9.0",
+    "graphviz>=0.20",
+]
+
+[project.scripts]
+jarvis = "jarvis.run:main"
+
+[project.urls]
+Homepage = "https://github.com/git-aditya3/Code-Jarvis"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["jarvis", "jarvis.ui"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = [".git", "__pycache__", "build", "dist", ".venv", "code assistance.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF"]
+ignore = [
+    "E501",    # a few docstring/help lines are clearer when left long
+    "B008",    # function calls in argument defaults are used for mutable defaults on purpose
+    "RUF012",  # class-level dicts on skills are read-only lookup tables
+    "SIM108",  # the ternary is not always the clearer form
+    "SIM117",  # nested `with` blocks stay readable for subTest + assertRaises
+    "SIM105",  # explicit try/except/pass documents which optional step was skipped
+    # Typographic dashes and quotes in user-facing text are deliberate
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # Optional backends (Qt, speech, graphviz, clipboard) are probed by trying
+    # them: swallowing those exceptions is the documented design, not an oversight.
+    "BLE001",
+    "S110",
+    "S112",
+    # The user's local clock is what they mean by "now"; timezone-aware handling
+    # belongs in the Clock skill, which does use zoneinfo.
+    "DTZ005",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# tests and the launcher adjust sys.path / env before importing jarvis
+"tests/*" = ["S101"]
+"run_jarvis.py" = ["E402"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["jarvis"]
+
+[tool.unittest]
+start-directory = "tests"
