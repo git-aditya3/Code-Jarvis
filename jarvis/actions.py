@@ -32,10 +32,12 @@ import re
 import shutil
 import time
 import zipfile
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus
 
 from .config import Settings, path_for
 from .control import ActionResult, Controller, human_error, open_path_with_default, os_name
@@ -153,6 +155,23 @@ WEB_SHORTCUTS: dict[str, str] = {
     "hacker news": "https://news.ycombinator.com", "amazon": "https://amazon.in",
 }
 
+#: Search URLs used by the ``web_search`` action — no API key, just the browser.
+SEARCH_ENGINES: dict[str, str] = {
+
+    "google": "https://www.google.com/search?q=",
+    "duckduckgo": "https://duckduckgo.com/?q=",
+    "bing": "https://www.bing.com/search?q=",
+    "youtube": "https://www.youtube.com/results?search_query=",
+    "wikipedia": "https://en.wikipedia.org/w/index.php?search=",
+    "github": "https://github.com/search?q=",
+    "stackoverflow": "https://stackoverflow.com/search?q=",
+    "stack overflow": "https://stackoverflow.com/search?q=",
+    "maps": "https://www.google.com/maps/search/",
+    "amazon": "https://www.amazon.in/s?k=",
+    "reddit": "https://www.reddit.com/search/?q=",
+}
+
+
 #: Windows that turn typed text into executed commands.
 TERMINAL_HINTS = (
     "terminal", "powershell", "command prompt", "cmd.exe", "bash", "zsh", "konsole",
@@ -182,6 +201,7 @@ class Decision:
     allowed: bool = True
     needs_confirmation: bool = False
     reason: str = ""
+    learned: bool = False        # the confirmation was skipped because of learned trust
 
     @property
     def blocked(self) -> bool:
@@ -191,8 +211,25 @@ class Decision:
 class Policy:
     """Turns (action, args, settings) into a decision. Never executes anything."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, profile: Any = None) -> None:
         self.settings = settings
+        self.profile = profile
+
+    def set_profile(self, profile: Any) -> None:
+        self.profile = profile
+
+    def learned_trust(self, action: str) -> bool:
+        """Has the user approved this ordinary action every single time so far?
+
+        Only ever consulted for CONFIRM-risk actions, and never for destructive
+        ones: “you always say yes to this” is not permission to delete files.
+        """
+        if not self.settings.get("learned_trust", True) or self.profile is None:
+            return False
+        try:
+            return bool(self.profile.learned_trust(action))
+        except Exception:
+            return False
 
     # ── shell ────────────────────────────────────────────────────────────
     @staticmethod
@@ -312,14 +349,20 @@ class Policy:
             )
 
         trust = str(self.settings.get("trust_level", "ask_risky"))
+        learned = False
         needs = False
         if risk == DANGEROUS:
             needs = True                                   # always asks, even when trusted
         elif risk == CONFIRM:
             needs = not (trust == "trusted" or approved_plan)
+            if needs and action.name and self.learned_trust(action.name):
+                needs = False
+                learned = True                             # you have always approved this one
+                reason = (reason + " " if reason else "") + \
+                    "you have approved this every time, so I stopped asking"
         elif risk == SAFE:
             needs = trust == "ask_all"
-        return Decision(risk, True, needs, reason)
+        return Decision(risk, True, needs, reason, learned)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -460,6 +503,27 @@ def _resolve(path: str) -> Path:
     return Policy.expand(path)
 
 
+def _rehearsing(ctx: ActionContext) -> bool:
+    """True when the front-end asked for a dry run.
+
+    The controller wraps its *backend* in a dry-run shim, which covers everything
+    that goes through it (keys, clicks, shell, power). File and host helpers do
+    their work directly, so they ask here instead of writing to the disk of
+    somebody who only wanted a rehearsal.
+    """
+    try:
+        return bool(getattr(ctx.controller, "simulate", False)) or bool(ctx.settings.get("dry_run"))
+    except Exception:  # pragma: no cover - defensive
+        return False
+
+
+def _rehearsal(ctx: ActionContext, what: str) -> ActionResult | None:
+    """A stand-in result for a dry run, or ``None`` when we should really act."""
+    if _rehearsing(ctx):
+        return ActionResult.done(f"[simulation] would {what}", simulated=True)
+    return None
+
+
 def _ensure_parent(path: Path) -> None:
     if path.parent and not path.parent.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -479,6 +543,54 @@ def _delete(path: Path, use_trash: bool) -> tuple[bool, str]:
         return True, "deleted permanently (no trash available)"
     path.unlink()
     return True, "deleted permanently (no trash available)"
+
+
+#: The phrase the HUD palette, the README and ``tools/audit_examples.py`` show for
+#: an action that has none of its own.
+DEFAULT_EXAMPLES: dict[str, tuple[str, ...]] = {
+    "active_window": ("what window is active",),
+    "ask_user": ("ask me for the invoice number",),
+    "click": ("click", "right click", "double click"),
+    "copy_path": ("copy report.md to ~/backup",),
+    "delete_path": ("delete report.md",),
+    "get_brightness": ("what's my brightness",),
+    "get_volume": ("what's the volume",),
+    "list_dir": ("list the files in my downloads",),
+    "list_processes": ("what processes are running",),
+    "list_windows": ("what windows are open",),
+    "make_dir": ("create a folder called projects",),
+    "maximize_window": ("maximize the browser",),
+    "minimize_window": ("minimise chrome",),
+    "move_mouse": ("move the mouse to 400, 300",),
+    "move_path": ("move report.md to archive",),
+    "notify": ("notify me that it's done",),
+    "open_path": ("open ~/Downloads", "open the folder downloads"),
+    "open_url": ("open github.com",),
+    "pointer_position": ("where is the pointer",),
+    "read_screen": ("read the screen",),
+    "remember": ("remember my desk is by the window",),
+    "run_skill": ("ask yourself what the time is",),
+    "screenshot": ("take a screenshot",),
+    "scroll": ("scroll down", "scroll up 5"),
+    "speak": ("say good morning",),
+    "switch_window": ("next window",),
+    "wait": ("wait 2",),
+    "write_file": ("save hello to notes.txt",),
+    "zip_path": ("zip report.md",),
+}
+
+
+def apply_default_examples(actions: dict[str, Action]) -> None:
+    """Give every action at least one phrase a human would actually say.
+
+    The palette, ``--actions``, the README table and the coverage audit all read
+    from here, and ``tests/test_jarvis.py`` asserts that each of these phrases
+    really reaches its action when you say it.
+    """
+    for name, phrases in DEFAULT_EXAMPLES.items():
+        action = actions.get(name)
+        if action is not None and not action.examples:
+            action.examples = phrases
 
 
 def build_actions(controller: Controller, audit: AuditLog | None = None) -> dict[str, Action]:
@@ -698,6 +810,30 @@ def build_actions(controller: Controller, audit: AuditLog | None = None) -> dict
         "set the display brightness to a percentage",
         lambda ctx, args: controller.brightness(int(ctx.require(args.get("level"), "level"))),
         {"level": "5-100"}, risk=SAFE, examples=("set brightness to 40",), group="display",
+    ))
+
+    # ── the web, as a first-class step ──────────────────────────────────
+
+    def web_search(ctx: ActionContext, args: dict[str, Any]) -> ActionResult:
+        """Open a search in the default browser — no API, no key, no scraping."""
+        query = str(ctx.require(args.get("query"), "query")).strip()
+        engine = str(args.get("engine") or ctx.settings.get("search_engine", "google")).lower()
+        base = SEARCH_ENGINES.get(engine, SEARCH_ENGINES["google"])
+        url = base + quote_plus(query)
+        if ctx.host.open_target(url):
+            return ActionResult.done(f"Searched {engine.title()} for “{query}”.")
+        return ActionResult.fail("I could not open your browser.",
+                                 hint="Check that a default browser is set.")
+
+    register(Action(
+        name="web_search",
+        title="Search the web",
+        description="open a search in the default browser (Google, YouTube, Wikipedia, GitHub…)",
+        run=web_search,
+        params={"query": "what to look for", "engine": "google|youtube|wikipedia|github|maps|…"},
+        risk=SAFE,
+        examples=("search the web for python releases", "search youtube for lofi beats"),
+        group="apps",
     ))
 
     # ── processes ───────────────────────────────────────────────────────
@@ -1144,7 +1280,7 @@ def build_actions(controller: Controller, audit: AuditLog | None = None) -> dict
     register(Action(
         "append_file", "Add to a file",
         "add a line or a block of text to the end of a file without touching what is there",
-        lambda ctx, args: _append_file(_resolve(str(ctx.require(args.get("path"), "path"))),
+        lambda ctx, args: _append_file(ctx, _resolve(str(ctx.require(args.get("path"), "path"))),
                                        str(args.get("content", ""))),
         {"path": "file to append to", "content": "text to add"},
         risk=CONFIRM, examples=("add 'buy milk' to my todo list",), group="files",
@@ -1238,6 +1374,7 @@ def build_actions(controller: Controller, audit: AuditLog | None = None) -> dict
         risk=DANGEROUS, examples=("empty the trash",), group="system",
     ))
 
+    apply_default_examples(actions)
     return actions
 
 
@@ -1579,7 +1716,10 @@ def _find_process(controller: Controller, name: str, limit: int = 10) -> ActionR
                              count=len(matches), matches=shown)
 
 
-def _append_file(path: Path, content: str) -> ActionResult:
+def _append_file(ctx: ActionContext, path: Path, content: str) -> ActionResult:
+    gate = _rehearsal(ctx, f"add “{content[:60]}” to {path}")
+    if gate:
+        return gate
     if not content:
         return ActionResult.fail("There is nothing to add.")
     if path.exists() and path.is_dir():
@@ -1692,8 +1832,6 @@ def _find_text_on_screen(controller: Controller, text: str) -> ActionResult:
                              x=found["x"], y=found["y"], text=found["text"])
 
 
-# ── small helpers used by the actions above ─────────────────────────────────
-
 def command_for_app(name: str) -> str | None:
     """Resolve a friendly app name to something the OS can launch."""
     name = (name or "").strip().lower()
@@ -1741,6 +1879,9 @@ def _list_dir(path: str) -> ActionResult:
 
 def _make_dir(ctx: ActionContext, path: str) -> ActionResult:
     target = _resolve(path)
+    gate = _rehearsal(ctx, f"create the folder {target}")
+    if gate:
+        return gate
     if target.exists():
         return ActionResult.done(f"{target} already exists.")
     target.mkdir(parents=True, exist_ok=False)
@@ -1749,6 +1890,9 @@ def _make_dir(ctx: ActionContext, path: str) -> ActionResult:
 
 def _write_file(ctx: ActionContext, path: str, content: str, append: bool) -> ActionResult:
     target = _resolve(path)
+    gate = _rehearsal(ctx, f"{'append' if append else 'write'} {len(content)} characters to {target}")
+    if gate:
+        return gate
     if target.is_dir():
         return ActionResult.fail(f"{target} is a folder.")
     _ensure_parent(target)
@@ -1763,6 +1907,9 @@ def _write_file(ctx: ActionContext, path: str, content: str, append: bool) -> Ac
 
 def _transfer(ctx: ActionContext, kind: str, source: str, destination: str) -> ActionResult:
     src, dst = _resolve(source), _resolve(destination)
+    gate = _rehearsal(ctx, f"{'copy' if kind == 'copy' else 'move'} {src} to {dst}")
+    if gate:
+        return gate
     if not src.exists():
         return ActionResult.fail(f"There is nothing at {src}.")
     if src == dst:
@@ -1784,6 +1931,9 @@ def _transfer(ctx: ActionContext, kind: str, source: str, destination: str) -> A
 
 def _delete_path(ctx: ActionContext, path: str) -> ActionResult:
     target = _resolve(path)
+    gate = _rehearsal(ctx, f"delete {target}")
+    if gate:
+        return gate
     if not target.exists():
         return ActionResult.fail(f"There is nothing at {target}.")
     use_trash = bool(ctx.settings.get("use_trash", True))
@@ -1795,6 +1945,9 @@ def _delete_path(ctx: ActionContext, path: str) -> ActionResult:
 
 def _zip(ctx: ActionContext, source: str, destination: str) -> ActionResult:
     src = _resolve(source)
+    gate = _rehearsal(ctx, f"archive {src}")
+    if gate:
+        return gate
     if not src.exists():
         return ActionResult.fail(f"There is nothing at {src}.")
     dst = _resolve(destination) if destination else src.with_suffix(".zip")
@@ -1846,14 +1999,19 @@ class ActionRegistry:
     """Looks up actions, enforces policy, asks for confirmation, writes the audit log."""
 
     def __init__(self, settings: Settings, memory: Memory, host: Host, controller: Controller,
-                 core: Any = None, audit: AuditLog | None = None) -> None:
+                 core: Any = None, audit: AuditLog | None = None,
+                 profile: Any = None) -> None:
         self.settings = settings
         self.memory = memory
         self.host = host
         self.controller = controller
         self.core = core
         self.audit = audit or AuditLog()
-        self.policy = Policy(settings)
+        self.profile = profile
+        self.policy = Policy(settings, profile)
+        #: The last few things that actually ran, used for learning by demonstration
+        #: (“that phrase did not work … this one did”) and for the UI activity feed.
+        self.recent: deque[dict[str, Any]] = deque(maxlen=60)
         self.actions = build_actions(controller, self.audit)
         self.recorder: Any = None          # set by jarvis.routines.RoutineRecorder
         self.timeline: Any = None          # set by the core (jarvis.routines.Timeline)
@@ -1909,6 +2067,11 @@ class ActionRegistry:
         decision = self.policy.evaluate(action, args, context.approved_plan)
 
         if decision.blocked:
+            if self.profile is not None and decision.risk == DANGEROUS:
+                try:
+                    self.profile.count_refusal(action.name)
+                except Exception:
+                    pass
             self.audit.record(action.name, args, decision, None, source,
                               {"outcome": "refused"})
             return ActionResult.fail(f"I won't do that — {decision.reason}",
@@ -1936,6 +2099,11 @@ class ActionRegistry:
                     data={"pending": True, "action": action.name},
                 )
             was_confirmed = self._confirm(question, detail, decision.risk)
+            if self.profile is not None:
+                try:
+                    self.profile.count_approval(action.name, bool(was_confirmed))
+                except Exception:
+                    pass
             if not was_confirmed:
                 self.audit.record(action.name, args, decision, None, source,
                                   {"outcome": "declined"})
@@ -1946,9 +2114,18 @@ class ActionRegistry:
         if decision.risk in (CONFIRM, DANGEROUS):
             self.audit.record(action.name, args, decision, result, source,
                               {"outcome": "done" if result.ok else "failed",
-                               "confirmed": True if confirmed is True else was_confirmed})
+                               "confirmed": True if confirmed is True else was_confirmed,
+                               "learned": bool(decision.learned) or None})
         else:
             self.audit.record(action.name, args, decision, result, source, {"outcome": "auto"})
+
+        # Behaviour learning: what worked, what failed, and how you approved it.
+        self._remember(action.name, args, result, source)
+        if self.profile is not None:
+            try:
+                self.profile.observe_action(action.name, args, ok=result.ok, source=source)
+            except Exception:
+                pass
 
         # Habit learning. Two different things are recorded here:
         #  * the timeline — only real, non-rehearsed actions, because a dry run must
@@ -1969,6 +2146,38 @@ class ActionRegistry:
             except Exception:
                 pass
         return result
+
+    # ── what happened just now (learning by demonstration, UI feed) ──────
+    def _remember(self, action: str, args: dict[str, Any], result: ActionResult,
+                  source: str) -> None:
+        if source == "alias":           # an alias replaying is not new behaviour
+            return
+        try:
+            self.recent.append({
+                "action": action, "args": dict(args or {}), "ok": bool(result.ok),
+                "source": source, "ts": time.time(),
+                "message": (getattr(result, "message", "") or "")[:200],
+            })
+        except Exception:
+            pass
+
+    def recent_actions(self, since: float = 0.0, source: str | None = None,
+                       limit: int = 24) -> list[tuple[str, dict[str, Any]]]:
+        """``[(action, args)]`` for everything that ran after ``since``."""
+        found: list[tuple[str, dict[str, Any]]] = []
+        for entry in list(self.recent):
+            if float(entry.get("ts", 0)) < since:
+                continue
+            if source is not None and entry.get("source") != source:
+                continue
+            if not entry.get("ok"):
+                continue
+            found.append((str(entry.get("action", "")), dict(entry.get("args") or {})))
+        return found[-limit:]
+
+    def activity(self, limit: int = 20) -> list[dict[str, Any]]:
+        """The newest-first feed the window shows in the Activity panel."""
+        return [dict(entry) for entry in reversed(list(self.recent)[-limit:])]
 
     def _confirm(self, title: str, detail: str, risk: str) -> bool:
         confirmer = getattr(self.host, "confirm", None)

@@ -26,13 +26,6 @@ DOCS = pathlib.Path(__file__).resolve().parent.parent / "docs"
 DOCS.mkdir(parents=True, exist_ok=True)
 
 
-def shoot(window: JarvisWindow, index: int, name: str) -> None:
-    window.tabs.setCurrentIndex(index)
-    app.processEvents()
-    window.grab().save(str(DOCS / name))
-    print("wrote", DOCS / name)
-
-
 app = QApplication(sys.argv)
 settings = Settings(path=HOME / "settings.json")
 settings["dry_run"] = True
@@ -49,24 +42,56 @@ window.resize(1180, 760)
 window.show()
 window.connect_core()
 
-shots = {0: "jarvis-window.png", 1: "jarvis-memory.png", 3: "jarvis-settings.png"}
+#: tab name → file, in the order the README shows them
+shots = {
+    "dashboard": "jarvis-window.png",
+    "routines": "jarvis-routines.png",
+    "actions": "jarvis-actions.png",
+    "learning": "jarvis-learning.png",
+    "memory": "jarvis-memory.png",
+    "settings": "jarvis-settings.png",
+}
+
+
+def seed_learning() -> None:
+    """Give the LEARNING panel something true to show."""
+    profile = getattr(getattr(window, "core", None), "profile", None)
+    if profile is None:
+        return
+    for action in ("open_app", "set_volume", "write_file", "read_screen",
+                   "media_control", "screenshot"):
+        for _ in range(2):
+            profile.observe_action(action, {"target": "chrome"} if action == "open_app" else {})
+    profile.observe_utterance("open chrome", skill="control")
+    profile.observe_utterance("chill", skill="fallback", ok=False)
+    profile.learn_alias("chill", action="open_app", args={"target": "spotify"})
+    profile.learn_alias("focus mode", action="set_volume", args={"level": 15}, taught=True)
+    for _ in range(4):
+        profile.count_approval("write_file", True)
+    profile.observe_action("zip_path", {"source": "report.md"})
+    for _ in range(3):
+        profile.observe_action("read_screen")
 
 
 def capture() -> None:
-    for index, name in shots.items():
-        shoot(window, index, name)
+    seed_learning()
+    for tab, name in shots.items():
+        window.goto_tab(tab)
+        app.processEvents()
+        window.grab().save(str(DOCS / name))
+        print("wrote", DOCS / name, flush=True)
     dialog = ConfirmDialog("Close Chrome?",
                            "close_window(title=chrome)\n\nrisk: confirm", "confirm", window)
     dialog.setModal(False)
     dialog.show()
     app.processEvents()
     dialog.grab().save(str(DOCS / "jarvis-approval.png"))
-    print("wrote", DOCS / "jarvis-approval.png")
+    print("wrote", DOCS / "jarvis-approval.png", flush=True)
     window.close()
     app.quit()
 
 
 QTimer.singleShot(400, capture)
 app.exec()
-print("done")
+print("done", flush=True)
 os._exit(0)

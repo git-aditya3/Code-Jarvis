@@ -30,30 +30,52 @@ VERSION = "1.0.0"
 # Environment variables checked for each provider's key.
 ENV_KEYS = {
     "groq": ("GROQ_API_KEY", "JARVIS_GROQ_API_KEY"),
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY", "JARVIS_GEMINI_API_KEY"),
+    "openrouter": ("OPENROUTER_API_KEY", "JARVIS_OPENROUTER_API_KEY"),
     "openai": ("OPENAI_API_KEY", "JARVIS_OPENAI_API_KEY"),
+    "pollinations": (),                      # free cloud, no key at all
 }
 
 PROVIDER_LABELS = {
-    "offline": "Offline skills (no key needed)",
-    "groq": "Groq Cloud (free tier available)",
-    "openai": "OpenAI",
-    "ollama": "Ollama (local, private)",
+    "pollinations": "Pollinations · free cloud (no key)",
+    "groq": "Groq · free tier (key)",
+    "gemini": "Google Gemini · free tier (key)",
+    "openrouter": "OpenRouter · free models (key)",
+    "ollama": "Ollama · local, private",
+    "openai": "OpenAI · paid (key)",
+    "offline": "Offline skills only",
 }
 
 PROVIDER_MODELS = {
-    "groq": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
+    # Pollinations serves open models without an API key; good default for “free by default”.
+    "pollinations": ["openai", "openai-large", "mistral", "llama", "qwen-coder"],
+    "groq": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gemma2-9b-it"],
+    "gemini": ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash"],
+    "openrouter": ["meta-llama/llama-3.3-70b-instruct:free", "deepseek/deepseek-r1:free",
+                   "google/gemma-2-9b-it:free", "qwen/qwen-2.5-72b-instruct:free"],
     "openai": ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"],
     "ollama": ["llama3.1", "qwen2.5", "codellama", "mistral"],
 }
+
+#: Providers that never need an API key (free cloud + local + the offline router).
+KEYLESS_PROVIDERS = ("pollinations", "ollama", "offline")
+
+#: Tried in this order when the one you configured cannot answer. Free first.
+FREE_LADDER = ("groq", "gemini", "openrouter", "pollinations", "ollama")
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     # identity
     "user_name": "",
     "city": "Tiruchirappalli",
     "units": "metric",              # metric | imperial
-    # brain
-    "provider": "offline",          # offline | groq | openai | ollama
-    "models": dict(PROVIDER_MODELS),
+    # brain — a free cloud model works out of the box, no key required
+    "provider": "pollinations",     # pollinations | groq | gemini | openrouter | ollama | openai | offline
+    "free_fallback": True,          # quietly try the other free providers when one is down
+    "llm_timeout": 25,              # seconds to wait before falling back
+    "response_cache": True,         # identical questions answered instantly
+    "cache_ttl": 900,               # seconds an answer stays cached
+    "stream_replies": True,         # show tokens as they arrive in the window
+    "models": {},                   # provider -> chosen model (empty = provider default)
     "ollama_url": "http://localhost:11434",
     "api_keys": {},                 # {provider: key}  (0600 on disk)
     "max_tokens": 900,
@@ -81,6 +103,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "voice_confirm": False,         # ask for risky actions out loud ("say yes to continue")
     "routine_log_limit": 200,       # remembered commands kept for pattern spotting
     "shell_timeout": 20,            # seconds before a command is abandoned
+    # learning — JARVIS adapts to how you actually work
+    "learn_habits": True,           # learn phrasings that work for you
+    "learned_trust": True,          # stop asking about ordinary actions you always approve
+    "ritual_suggestions": True,     # notice “every morning you …” patterns
+    "profile_save_interval": 5,     # seconds to batch learning writes (keeps it fast)
     # interface
     "always_on_top": True,
     "opacity": 0.97,
@@ -133,9 +160,15 @@ class Settings:
         stored = _read_json(self.path, {})
         if isinstance(stored, dict):
             self._data.update(stored)
-        # nested dicts need merging rather than replacing
-        models = dict(PROVIDER_MODELS)
-        models.update(self._data.get("models") or {})
+        # ``models`` holds the *chosen* model per provider. An older build stored
+        # the whole choice list here, so normalise anything list-shaped on load.
+        models: dict[str, str] = {}
+        for name, value in (self._data.get("models") or {}).items():
+            if isinstance(value, (list, tuple)):
+                if value:
+                    models[name] = str(value[0])
+            elif value:
+                models[name] = str(value)
         self._data["models"] = models
         if not isinstance(self._data.get("api_keys"), dict):
             self._data["api_keys"] = {}
@@ -161,7 +194,7 @@ class Settings:
         keys = dict(self._data.get("api_keys") or {})
         self._data = dict(DEFAULT_SETTINGS)
         self._data["api_keys"] = keys
-        self._data["models"] = dict(PROVIDER_MODELS)
+        self._data["models"] = {}
 
     def save(self) -> None:
         _write_json(self.path, self._data, private=True)
@@ -175,6 +208,8 @@ class Settings:
         provider = (provider or self.provider).lower()
         models = self._data.get("models") or {}
         model = models.get(provider)
+        if isinstance(model, (list, tuple)):
+            model = model[0] if model else ""
         if model:
             return str(model)
         chain = PROVIDER_MODELS.get(provider) or ["llama3.1"]

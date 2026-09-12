@@ -71,6 +71,8 @@ from PyQt6.QtWidgets import (
 
 from ..actions import TRUST_LABELS
 from ..config import (
+    ENV_KEYS,
+    KEYLESS_PROVIDERS,
     PROVIDER_LABELS,
     PROVIDER_MODELS,
     VERSION,
@@ -84,6 +86,7 @@ from ..memory import Memory
 from ..voice import SpeechToText, TextToSpeech, WakeWordListener
 from ..voice import probe as probe_voice
 from .hud import HudWidget
+from .panels import ActionsPanel, CommandPalette, DashboardPanel, LearningPanel, RoutinesPanel
 from .theme import accent_colors, stylesheet
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -513,11 +516,128 @@ class JarvisWindow(QWidget):
     def _build_right_panel(self) -> QWidget:
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
-        self.tabs.addTab(self._build_conversation_tab(), "CONVERSATION")
-        self.tabs.addTab(self._build_skills_tab(), "SKILLS")
-        self.tabs.addTab(self._build_memory_tab(), "MEMORY")
-        self.tabs.addTab(self._build_settings_tab(), "SETTINGS")
+        self._lazy: dict[int, Any] = {}
+        self._built: set[str] = set()
+        # The dashboard and the chat box are built immediately (they are what you
+        # look at first, and the box must accept focus); the heavier panels are
+        # built the first time you open them, which keeps launch snappy.
+        self.tabs.addTab(self._build_dashboard_tab(), "HOME")
+        self.tabs.addTab(self._build_conversation_tab(), "CHAT")
+        self.tabs.addTab(self._placeholder_tab("routines"), "ROUTINES")
+        self.tabs.addTab(self._placeholder_tab("actions"), "ACTIONS")
+        self.tabs.addTab(self._placeholder_tab("learning"), "LEARNING")
+        self.tabs.addTab(self._placeholder_tab("skills"), "SKILLS")
+        self.tabs.addTab(self._placeholder_tab("memory"), "MEMORY")
+        self.tabs.addTab(self._placeholder_tab("settings"), "SETTINGS")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         return self.tabs
+
+    #: tab label → builder, filled by :meth:`_placeholder_tab`.
+    TAB_BUILDERS: dict[str, str] = {
+        "routines": "_build_routines_tab",
+        "actions": "_build_actions_tab",
+        "learning": "_build_learning_tab",
+        "skills": "_build_skills_tab",
+        "memory": "_build_memory_tab",
+        "settings": "_build_settings_tab",
+    }
+
+    def _placeholder_tab(self, name: str) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 24, 24, 24)
+        label = QLabel(f"{name.title()} loads when you open this tab…")
+        label.setObjectName("Hint")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(label)
+        page.setProperty("jarvis_tab", name)
+        return page
+
+    def _materialise(self, name: str) -> QWidget | None:
+        """Build a deferred tab the first time it is shown."""
+        if name not in self.TAB_BUILDERS or name in self._built:
+            return None
+        builder = getattr(self, self.TAB_BUILDERS[name])
+        page = builder()
+        self._built.add(name)
+        if name == "settings":
+            self.apply_settings_to_ui()
+        for index in range(self.tabs.count()):
+            widget = self.tabs.widget(index)
+            if widget is not None and widget.property("jarvis_tab") == name:
+                self.tabs.removeTab(index)
+                self.tabs.insertTab(index, page, name.upper())
+                self.tabs.setCurrentIndex(index)
+                return page
+        return None
+
+    def _on_tab_changed(self, index: int) -> None:
+        widget = self.tabs.widget(index)
+        name = str(widget.property("jarvis_tab") or "") if widget is not None else ""
+        if name:
+            self._materialise(name)
+        self.refresh_panels(index)
+
+    def _build_dashboard_tab(self) -> QWidget:
+        self.dashboard = DashboardPanel(self)
+        return self.dashboard
+
+    def _build_routines_tab(self) -> QWidget:
+        self.routines_panel = RoutinesPanel(self)
+        return self.routines_panel
+
+    def _build_actions_tab(self) -> QWidget:
+        self.actions_panel = ActionsPanel(self)
+        return self.actions_panel
+
+    def _build_learning_tab(self) -> QWidget:
+        self.learning_panel = LearningPanel(self)
+        return self.learning_panel
+
+    # ── panel plumbing ───────────────────────────────────────────────────
+    TAB_NAMES = ("dashboard", "conversation", "routines", "actions", "learning",
+                 "skills", "memory", "settings")
+
+    def goto_tab(self, name: str) -> None:
+        """Jump to a tab by name (used by the palette, dashboard and commands)."""
+        name = (name or "").strip().lower()
+        aliases = {"home": "dashboard", "chat": "conversation", "profile": "learning",
+                   "behaviour": "learning", "palette": "dashboard",
+                   "control": "actions", "brain": "settings"}
+        name = aliases.get(name, name)
+        if name not in self.TAB_NAMES:
+            return
+        index = self.TAB_NAMES.index(name)
+        self._materialise(name)
+        self.tabs.setCurrentIndex(index)
+        self.refresh_panels(index)
+
+    def refresh_panels(self, index: int | None = None) -> None:
+        """Ask whichever panel is visible to redraw itself from live state."""
+        index = self.tabs.currentIndex() if index is None else index
+        widget = self.tabs.widget(index)
+        name = str(widget.property("jarvis_tab") or "") if widget is not None else ""
+        if not name:
+            name = self.TAB_NAMES[index] if 0 <= index < len(self.TAB_NAMES) else ""
+        panel = {"dashboard": getattr(self, "dashboard", None),
+                 "routines": getattr(self, "routines_panel", None),
+                 "actions": getattr(self, "actions_panel", None),
+                 "learning": getattr(self, "learning_panel", None)}.get(name)
+        if panel is None:
+            if name == "skills":
+                self.refresh_skills()
+            elif name == "memory":
+                self._refresh_memory_ui()
+            return
+        try:
+            panel.refresh()
+        except Exception as exc:                       # a panel must never crash the app
+            self.log(f"Panel refresh failed: {exc}", level="error")
+
+    def open_palette(self) -> None:
+        """⌘K / Ctrl+K — every skill, action, routine and setting in one box."""
+        self.palette = CommandPalette(self, self)
+        self.palette.open()
 
     def _build_conversation_tab(self) -> QWidget:
         page = QWidget()
@@ -905,15 +1025,18 @@ class JarvisWindow(QWidget):
         layout.setContentsMargins(14, 2, 14, 2)
         layout.setSpacing(14)
 
-        self.status_brain = QLabel("brain: offline skills")
+        self.status_brain = QLabel("brain: free cloud")
         self.status_voice = QLabel("voice: checking")
         self.status_memory = QLabel("memory: –")
+        self.status_learned = QLabel("learned: –")
+        self.status_learned.setObjectName("Hint")
         self.status_last = QLabel("")
         self.status_last.setObjectName("Hint")
         for widget in (self.status_brain, self.status_voice):
             widget.setObjectName("Hint")
             layout.addWidget(widget)
         layout.addWidget(self.status_memory)
+        layout.addWidget(self.status_learned)
         layout.addStretch(1)
         layout.addWidget(self.status_last)
         self.status_memory.setObjectName("Hint")
@@ -930,8 +1053,17 @@ class JarvisWindow(QWidget):
             shortcut = QShortcut(QKeySequence(sequence), self)
             shortcut.activated.connect(handler)
 
+        add("Ctrl+K", self.open_palette)
         add("Ctrl+Space", self.focus_input)
         add("Ctrl+M", self.toggle_mic)
+        add("Ctrl+1", lambda: self.goto_tab("dashboard"))
+        add("Ctrl+2", lambda: self.goto_tab("conversation"))
+        add("Ctrl+3", lambda: self.goto_tab("routines"))
+        add("Ctrl+4", lambda: self.goto_tab("actions"))
+        add("Ctrl+5", lambda: self.goto_tab("learning"))
+        add("Ctrl+6", lambda: self.goto_tab("skills"))
+        add("Ctrl+7", lambda: self.goto_tab("memory"))
+        add("Ctrl+8", lambda: self.goto_tab("settings"))
         add("Ctrl+Q", self.quit_app)
         add("Ctrl+B", lambda: self.submit("brief me"))
         add("F1", lambda: self.submit("help"))
@@ -948,6 +1080,10 @@ class JarvisWindow(QWidget):
             self.recheck_voice()
 
     def apply_settings_to_ui(self) -> None:
+        # The Settings tab is built lazily: until it exists there is nothing to
+        # fill in, and it applies itself the moment it is built.
+        if not hasattr(self, "provider_combo"):
+            return
         provider = self.settings.provider
         index = self.provider_combo.findData(provider)
         if index >= 0:
@@ -1013,8 +1149,10 @@ class JarvisWindow(QWidget):
     def reload_models(self, provider: str) -> None:
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
-        models = list((self.settings.as_dict().get("models") or {}).get(provider) or [])
-        models += [m for m in PROVIDER_MODELS.get(provider, []) if m not in models]
+        chosen = self.settings.model_for(provider)
+        models = list(PROVIDER_MODELS.get(provider, []))
+        if chosen and chosen not in models:
+            models.insert(0, chosen)
         if provider == "ollama":
             live = self.core.brain.list_ollama_models()
             models = live + [m for m in models if m not in live]
@@ -1027,9 +1165,16 @@ class JarvisWindow(QWidget):
         self.settings["provider"] = provider
         self.settings.save()
         self.reload_models(provider)
-        self.key_input.setEnabled(provider in ("groq", "openai"))
+        needs_key = provider not in KEYLESS_PROVIDERS
+        self.key_input.setEnabled(needs_key)
         self.ollama_input.setEnabled(provider == "ollama")
-        self.key_input.setText(self.settings.api_key(provider) if provider in ("groq", "openai") else "")
+        self.key_input.setText(self.settings.api_key(provider) if needs_key else "")
+        if not needs_key and hasattr(self, "key_hint"):
+            self.key_hint.setText(f"{PROVIDER_LABELS.get(provider, provider)} works with no key — "
+                                  "paste one only if you have your own.")
+        elif hasattr(self, "key_hint"):
+            names = " or ".join(f"${name}" for name in (ENV_KEYS.get(provider) or ())[:2])
+            self.key_hint.setText(f"A free key works. Environment {names} or paste it here.")
         self.recheck_voice()
         self.update_status_bar()
 
@@ -1037,7 +1182,7 @@ class JarvisWindow(QWidget):
         if not model:
             return
         models = dict(self.settings.as_dict().get("models") or {})
-        models[self.settings.provider] = model
+        models[self.settings.provider] = str(model)
         self.settings["models"] = models
         self.settings.save()
 
@@ -1383,6 +1528,8 @@ class JarvisWindow(QWidget):
         bar.setValue(bar.maximum())
 
     def append_log(self, text: str, level: str = "info") -> None:
+        if level == "jarvis" and self._end_stream(self.last_response or Response(text="")):
+            return
         role = {"user": "user", "error": "error", "alarm": "system"}.get(level, "jarvis")
         if "\x00" in text:  # label travels with the message, so no shared state
             text, detail = text.split("\x00", 1)
@@ -1407,7 +1554,7 @@ class JarvisWindow(QWidget):
         self.mic_button.style().polish(self.mic_button)
 
     def focus_input(self) -> None:
-        self.tabs.setCurrentIndex(0)
+        self.goto_tab("conversation")
         self.input.setFocus()
         self.input.selectAll()
 
@@ -1432,6 +1579,10 @@ class JarvisWindow(QWidget):
             # ask_async calls back from a worker thread: hop to the GUI thread.
             self.invoker.call(apply_response, response)
 
+        def chunk(piece: str) -> None:
+            # streamed model output: fire-and-forget into the GUI thread
+            self.invoker.call(lambda text=piece: self._stream_chunk(text))
+
         def apply_response(response: Response) -> None:
             self.last_response = response
             self.set_state("idle")
@@ -1445,9 +1596,48 @@ class JarvisWindow(QWidget):
                 self.refresh_memory()
             if response.ui_action.get("quit"):
                 self.quit_app()
+            focus = str(response.ui_action.get("focus") or "")
+            if focus and focus != "timers":
+                self.goto_tab(focus)
             self.update_status_bar()
+            # The dashboard/learning panels show live counters: refresh the one
+            # that is on screen so a button press visibly updates immediately.
+            if not self._streaming:
+                self.refresh_panels()
 
-        self.core.ask_async(text, finished)
+        self._stream_buffer = ""
+        self._streaming = False
+        self.core.ask_async(text, finished, on_chunk=chunk)
+
+    # ── streamed answers ─────────────────────────────────────────────────
+    def _stream_chunk(self, piece: str) -> None:
+        """Append a model token to the transcript as it arrives."""
+        if not piece:
+            return
+        if not self._streaming:
+            self._streaming = True
+            self._insert_html(render_message("", "jarvis", self.accent, "streaming…"))
+        self._stream_buffer += piece
+        cursor = self.transcript.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.insertText(piece)
+        self.transcript.setTextCursor(cursor)
+        bar = self.transcript.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _end_stream(self, response: Response) -> bool:
+        """Close a streamed message. True when the transcript already has the text."""
+        if not self._streaming:
+            return False
+        self._streaming = False
+        streamed = self._stream_buffer.strip()
+        self._stream_buffer = ""
+        if response.ok and streamed and response.text.strip().startswith(streamed[:120]):
+            # The streamed tokens *are* the answer — add the attribution only.
+            detail = f"{response.provider}" + (f" · {response.duration:.1f}s" if response.duration else "")
+            self._insert_html(render_message("", "jarvis", self.accent, detail))
+            return True
+        return False
 
     def eventFilter(self, source: QObject, event: QEvent) -> bool:  # noqa: N802
         if source is self.input and event.type() == QEvent.Type.KeyPress:
@@ -1534,7 +1724,7 @@ class JarvisWindow(QWidget):
     def _use_skill_example(self, item: QListWidgetItem) -> None:
         example = item.data(Qt.ItemDataRole.UserRole) or ""
         if example:
-            self.tabs.setCurrentIndex(0)
+            self.goto_tab("conversation")
             self.input.setText(example)
             self.input.setFocus()
             self.input.selectAll()
@@ -1656,10 +1846,12 @@ class JarvisWindow(QWidget):
         if not hasattr(self, "status_brain"):  # still building the layout
             return
         brain = self.core.brain
-        label = PROVIDER_LABELS.get(brain.provider, brain.provider)
+        label = PROVIDER_LABELS.get(brain.provider, brain.provider).split("·")[0].strip()
         model = self.settings.model_for()
+        if brain.enabled and not brain.ready and brain.provider not in ("ollama", "pollinations"):
+            label += " (no key)"
         self.status_brain.setText(f"brain: {label}" + (f" · {model}" if brain.enabled else ""))
-        if self.title_bar:
+        if getattr(self, "title_bar", None) is not None:
             text = "OFFLINE SKILLS" if not brain.enabled else brain.provider.upper()
             if brain.enabled and not brain.ready and brain.provider != "ollama":
                 text += " · NO KEY"
@@ -1668,8 +1860,15 @@ class JarvisWindow(QWidget):
             f"voice: out {('ready' if self.tts.available else 'off')} · in {('ready' if self.stt.available else 'off')}"
         )
         self.status_memory.setText(f"memory: {self.memory.stats()['turns']} turns")
-        if self.brain_status and brain.enabled:
-            self.brain_status.setText(brain.status())
+        if hasattr(self, "status_learned"):
+            stats = self.core.profile.stats()
+            routines = len(self.core.routine_store.all()) if self.core.routine_store else 0
+            self.status_learned.setText(
+                f"learned: {stats['distinct_actions']} actions · {stats['aliases']} phrases · "
+                f"{routines} routine(s)")
+        brain_status = getattr(self, "brain_status", None)
+        if brain_status is not None and brain.enabled:
+            brain_status.setText(brain.status())
 
     def quit_app(self) -> None:
         try:

@@ -19,19 +19,21 @@ import time
 import unittest
 import zipfile
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 TEMP_HOME = tempfile.mkdtemp(prefix="jarvis-tests-")
 os.environ["JARVIS_HOME"] = TEMP_HOME
 
-from jarvis.actions import ActionRegistry, Policy, shortcut_table  # noqa: E402
+from jarvis.actions import SAFE, ActionRegistry, Policy, build_actions, shortcut_table  # noqa: E402
 from jarvis.analyzers import analyze_code, detect_language, extract_code_from_text  # noqa: E402
-from jarvis.config import Settings  # noqa: E402
+from jarvis.config import PROVIDER_LABELS, Settings  # noqa: E402
 from jarvis.control import Controller  # noqa: E402
 from jarvis.core import Core  # noqa: E402
 from jarvis.flowchart import build_diagram, python_flow  # noqa: E402
 from jarvis.host import HeadlessHost  # noqa: E402
+from jarvis.learning import BehaviourProfile  # noqa: E402
 from jarvis.memory import Memory  # noqa: E402
 from jarvis.planner import Planner, parse, split_steps  # noqa: E402
 from jarvis.routines import Routine, RoutineRunner, RoutineStore, Step, Timeline, suggestions  # noqa: E402
@@ -89,6 +91,18 @@ class ControlTestCase(ParseChecks, JarvisTestCase):
         self.store = self.core.routine_store
         self.timeline = self.core.timeline
 
+    def use_real_files(self) -> None:
+        """Switch the rehearsal off for tests that must touch a temp folder.
+
+        ``dry_run`` is authoritative for file actions too (a rehearsal must not
+        write to your disk), so a test that asserts on real bytes has to turn it
+        off explicitly.
+        """
+        self.settings["dry_run"] = False
+        self.core = Core(self.settings, self.memory, self.host)
+        self.registry = self.core.actions
+        self.controller = self.core.controller
+
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -121,9 +135,30 @@ class TestRouting(JarvisTestCase):
         self.assertEqual(self.core.ask("who are you").skill, "identity")
 
     def test_offline_fallback_is_honest(self):
-        response = self.core.ask("draft a legal contract for my startup")
+        # Offline mode is still a choice you can make, and it must never pretend
+        # to have an answer it does not have.
+        self.settings["provider"] = "offline"
+        core = Core(self.settings, self.memory, self.host)
+        response = core.ask("draft a legal contract for my startup")
         self.assertEqual(response.skill, "fallback")
         self.assertIn("/help", response.text)
+        core.shutdown()
+
+    def test_default_brain_is_a_free_cloud_model(self):
+        from jarvis.config import DEFAULT_SETTINGS, FREE_LADDER, KEYLESS_PROVIDERS
+        provider = DEFAULT_SETTINGS["provider"]
+        self.assertIn(provider, FREE_LADDER, "the shipped default must be a free provider")
+        self.assertIn(provider, KEYLESS_PROVIDERS, "the default must work with no API key")
+        self.assertIn("free", PROVIDER_LABELS[provider].lower())
+        brain = self.core.brain
+        self.assertTrue(brain.enabled, "a model, not just the offline router, is the default")
+        self.assertTrue(brain.ready, "the free default needs no key to be usable")
+        self.assertIn("no key needed", brain.status())
+
+    def test_brain_reports_free_ladder(self):
+        ladder = self.core.brain.ladder()
+        self.assertEqual(ladder[0], "pollinations")
+        self.assertNotIn("offline", ladder, "offline is the router, not a model to try")
 
     def test_slash_commands(self):
         self.assertIn("JARVIS v", self.core.ask("/help").text)
@@ -401,12 +436,24 @@ class TestSettings(JarvisTestCase):
             self.assertIn(mode, {"600", "640", "660"})
 
     def test_missing_key_is_reported_clearly(self):
+        # A keyed provider without a key must say so — and the free ladder must
+        # still be offered rather than failing silently.
         self.settings["provider"] = "groq"
+        self.settings["free_fallback"] = False
         self.settings.set_api_key("groq", "")
         self.assertFalse(self.core.brain.ready)
+        self.assertIn("no key", self.core.brain.status())
+        self.assertIn("GROQ_API_KEY", self.core.brain.status())
         response = self.core.ask("tell me a story")
         self.assertFalse(response.ok)
-        self.assertIn("No API key", response.text)
+        self.assertIn("No provider is available", response.text)
+
+    def test_keyed_provider_leads_the_ladder_once_it_has_a_key(self):
+        self.settings.set_api_key("groq", "gsk_not_a_real_key_000000000000")
+        self.settings["provider"] = "groq"
+        ladder = self.core.brain.ladder()
+        self.assertEqual(ladder[0], "groq")
+        self.assertIn("pollinations", ladder, "the free default stays as a safety net")
 
 
 class TestHostContract(JarvisTestCase):
@@ -463,8 +510,8 @@ class TestPlannerParsing(ParseChecks, unittest.TestCase):
         self.check("set the volume to 30", "set_volume", level=30)
         self.check("volume 65", "set_volume", level=65)
         self.check("volume down 15", "nudge_volume", delta=-15)
-        self.check("mute", "set_volume", mute="on")
-        self.check("unmute", "set_volume", mute="off")
+        self.check("mute", "mute_control", action="on")
+        self.check("unmute", "mute_control", action="off")
         self.check("set brightness to 40", "set_brightness", level=40)
         self.check("dim the screen", "set_brightness", level=25)
 
@@ -700,6 +747,7 @@ class TestFileActions(ControlTestCase):
 
     def setUp(self) -> None:
         super().setUp()
+        self.use_real_files()
         self.workspace = Path(tempfile.mkdtemp(prefix="jarvis-files-"))
         self.source = self.workspace / "notes.txt"
         self.source.write_text("hello", encoding="utf-8")
@@ -735,6 +783,24 @@ class TestFileActions(ControlTestCase):
         allowed = self.registry.execute("delete_path", {"path": str(folder)})
         self.assertTrue(allowed.ok)
         self.assertFalse(folder.exists())
+
+    def test_the_rehearsal_never_touches_the_disk(self):
+        """A dry run reports what it *would* do — it must not do it."""
+        self.settings["dry_run"] = True
+        registry = ActionRegistry(self.settings, self.memory, self.host, Controller(self.settings))
+        target = self.workspace / "rehearsal.txt"
+        result = registry.execute("write_file", {"path": str(target), "content": "nope"})
+        self.assertTrue(result.ok)
+        self.assertIn("[simulation]", result.message)
+        self.assertFalse(target.exists())
+
+        folder = self.workspace / "rehearsal-dir"
+        self.assertIn("[simulation]", registry.execute("make_dir", {"path": str(folder)}).message)
+        self.assertIn("[simulation]",
+                      registry.execute("zip_path", {"source": str(self.source)}).message)
+        self.assertFalse(folder.exists())
+        self.assertFalse((self.workspace / "notes.zip").exists())
+        self.assertEqual(self.source.read_text(encoding="utf-8"), "hello")
 
     def test_sensitive_path_is_refused(self):
         result = self.registry.execute("write_file", {"path": "~/.ssh/authorized_keys",
@@ -981,6 +1047,7 @@ class TestControlSkills(ControlTestCase):
 
     def test_control_can_be_switched_off(self):
         self.settings["control_enabled"] = False
+        self.settings["provider"] = "offline"          # no cloud model in this test
         core = Core(self.settings, Memory(), HeadlessHost(verbose=False))
         self.assertIsNone(core.actions)
         names = {skill.name for skill in core.registry.skills}
@@ -1112,6 +1179,7 @@ class TestEverydayActions(ControlTestCase):
         self.assertTrue(found.hint or "install" in found.message.lower() or found.message)
 
     def test_files_can_be_read_searched_and_unpacked(self):
+        self.use_real_files()                    # this one asserts on real bytes
         folder = self.home / "files"
         folder.mkdir(parents=True, exist_ok=True)
         (folder / "notes.txt").write_text("first line\nsecond line\nthird line\n", encoding="utf-8")
@@ -1300,3 +1368,292 @@ class TestMainThreadInvoker(unittest.TestCase):
             threading.Event().wait(0.02)
         thread.join(timeout=5)
         self.assertEqual(seen.get("error"), "ZeroDivisionError")
+
+
+class TestBehaviourLearning(JarvisTestCase):
+    """JARVIS adapts to how this particular user works."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.settings["dry_run"] = True
+        self.settings["provider"] = "offline"     # no network in the test sandbox
+        self.host.confirm_answer = True
+        self.core = Core(self.settings, self.memory, self.host)
+        self.profile = self.core.profile
+
+    def test_profile_records_actions_and_apps(self):
+        self.profile.observe_action("open_app", {"target": "chrome"}, ok=True)
+        self.profile.observe_action("open_app", {"target": "chrome"}, ok=True)
+        self.profile.observe_action("set_volume", {"level": 20}, ok=False)
+        stats = self.profile.stats()
+        self.assertEqual(stats["actions_seen"], 3)
+        self.assertIn(("chrome", 2), self.profile.top_apps())
+        self.assertEqual(self.profile.top_actions(1)[0], ("open_app", 2))
+
+    def test_profile_persists_and_can_be_reset(self):
+        self.profile.learn_alias("chill", action="open_app", args={"target": "spotify"}, taught=True)
+        self.profile.flush(force=True)
+        reloaded = BehaviourProfile(self.profile.path)
+        self.assertIn("chill", reloaded.aliases())
+        reloaded.reset()
+        self.assertEqual(reloaded.aliases(), {})
+
+    def test_alias_runs_the_action_it_was_taught(self):
+        self.profile.learn_alias("chill", action="set_volume", args={"level": 5}, taught=True)
+        response = self.core.ask("chill")
+        self.assertTrue(response.ok)
+        self.assertIn("set volume", response.text)
+        self.assertEqual(response.data.get("action"), "set_volume")
+
+    def test_jarvis_learns_a_phrase_from_demonstration(self):
+        # A phrase nothing understands, then the command the user meant.
+        miss = self.core.ask("frobnicate the thing")
+        self.assertEqual(miss.skill, "fallback", "nothing should understand this yet")
+        self.core.ask("open notepad")
+        self.assertIn("frobnicate the thing", self.profile.aliases())
+        learned = self.profile.aliases()["frobnicate the thing"]
+        self.assertEqual(learned["action"], "open_app")
+        self.assertEqual(learned["args"].get("target"), "notepad")
+        # …and it works from then on.
+        self.assertTrue(self.core.ask("frobnicate the thing").ok)
+
+    def test_teach_command_creates_a_multi_step_alias(self):
+        reply = self.core.ask("/teach focus mode = open notepad, then set the volume to 5")
+        self.assertTrue(reply.ok)
+        self.assertIn("2 steps", reply.text)
+        self.assertIsNotNone(self.core.routine_store.get("focus mode"))
+        self.assertTrue(self.core.ask("focus mode").ok)
+
+    def test_forget_removes_an_alias(self):
+        self.core.ask("/teach chill = open notepad")
+        self.assertTrue(self.core.ask("/forget chill").ok)
+        self.assertIn("chill", self.core.ask("/forget chill").text)
+
+    def test_repeated_approval_teaches_trust(self):
+        action = self.core.actions.get("close_window")
+        self.assertTrue(self.core.actions.policy.evaluate(action, {}).needs_confirmation)
+        for _ in range(4):
+            self.profile.count_approval("close_window", True)
+        decision = self.core.actions.policy.evaluate(action, {})
+        self.assertFalse(decision.needs_confirmation)
+        self.assertTrue(decision.learned)
+
+    def test_a_single_no_blocks_learned_trust(self):
+        for _ in range(5):
+            self.profile.count_approval("close_window", True)
+        self.profile.count_approval("close_window", False)
+        self.assertFalse(self.profile.learned_trust("close_window"))
+        self.assertTrue(self.core.actions.policy.evaluate(
+            self.core.actions.get("close_window"), {}).needs_confirmation)
+
+    def test_dangerous_actions_never_earn_trust(self):
+        for _ in range(10):
+            self.profile.count_approval("delete_path", True)
+        self.settings["allow_dangerous"] = True
+        decision = self.core.actions.policy.evaluate(self.core.actions.get("delete_path"),
+                                                     {"path": "x.txt"})
+        self.assertTrue(decision.needs_confirmation, "destructive actions must always ask")
+
+    def test_rituals_need_more_than_one_day(self):
+        now = time.time()
+        for day in (0, 1):
+            self.profile.observe_action("open_app", {"target": "slack"}, ts=now - day * 86400)
+        self.assertEqual(len(self.profile.rituals()), 1)
+        self.assertIn("at this time of day", self.profile.summary())
+
+    def test_profile_feeds_the_model_prompt(self):
+        self.profile.observe_action("open_app", {"target": "chrome"}, ok=True)
+        bits = self.profile.prompt_bits()
+        self.assertIn("chrome", bits)
+
+    def test_learning_can_be_switched_off(self):
+        self.settings["learn_habits"] = False
+        core = Core(self.settings, self.memory, HeadlessHost(verbose=False))
+        core.ask("open notepad")
+        self.assertFalse(core.profile.enabled)
+        self.assertEqual(core.profile.stats()["actions_seen"], 0)
+        core.shutdown()
+
+
+class TestBrainEfficiency(JarvisTestCase):
+    """The free-cloud brain: free by default, cached, and honest when offline."""
+
+    def test_identical_questions_are_cached(self):
+        from jarvis.brain import Reply
+        brain = self.core.brain
+        calls = []
+
+        def fake_ask_compatible(messages, provider):
+            calls.append(provider)
+            return "same answer", "test-model"
+
+        brain._ask_compatible = fake_ask_compatible          # type: ignore[assignment]
+        brain._failed.clear()
+        first = brain.ask("what is the time", use_cache=True)
+        second = brain.ask("what is the time", use_cache=True)
+        self.assertTrue(first.ok)
+        self.assertTrue(second.cached)
+        self.assertEqual(len(calls), 1, "the second identical question must not hit the network")
+        self.assertIsInstance(brain._cache.get("nope"), (Reply, type(None)))
+
+    def test_failing_provider_is_skipped_for_a_while(self):
+        brain = self.core.brain
+        brain.note_failure("pollinations")
+        self.assertTrue(brain.in_cooldown("pollinations"))
+        brain.note_success("pollinations")
+        self.assertFalse(brain.in_cooldown("pollinations"))
+
+    def test_no_network_is_reported_fast_and_honestly(self):
+        brain = self.core.brain
+        brain.note_offline()
+        started = time.time()
+        reply = brain.ask("hello there", use_cache=False)
+        self.assertLess(time.time() - started, 0.5, "an offline brain must not stall the window")
+        self.assertFalse(reply.ok)
+        self.assertIn("network", reply.error.lower())
+
+    def test_streaming_yields_chunks(self):
+        brain = self.core.brain
+
+        def fake_stream(messages, provider):
+            yield from ("Hel", "lo ", "there")
+
+        brain._stream_compatible = fake_stream                 # type: ignore[assignment]
+        brain._failed.clear()
+        pieces = list(brain.ask_stream("say hello"))
+        self.assertEqual("".join(pieces), "Hello there")
+
+    def test_streamed_answer_reaches_the_ui_callback(self):
+        """The window sees tokens while the rest of the answer is still arriving."""
+        import threading
+
+        core = self.core
+        core.settings["provider"] = "gemini"          # a provider, without a real key
+        core.settings.set_api_key("gemini", "test-key-not-used")
+        chunks: list[str] = []
+        done = threading.Event()
+        boxes: list[Any] = []
+
+        def fake_stream(*_args, **_kwargs):
+            yield from ("All ", "systems ", "nominal.")
+
+        core.brain.ask_stream = fake_stream                    # type: ignore[assignment]
+        core.ask_async("compose a short haiku about the stars",
+                       lambda response: (boxes.append(response), done.set()),
+                       on_chunk=chunks.append)
+        self.assertTrue(done.wait(10), "the answer never arrived")
+        self.assertEqual(chunks, ["All ", "systems ", "nominal."])
+        self.assertTrue(boxes[0].ok)
+        self.assertEqual(boxes[0].text, "All systems nominal.")
+
+
+class TestWebSearch(ParseChecks, JarvisTestCase):
+    """Searching is a first-class action, so plans can include it."""
+
+    def test_engines(self):
+        self.check("search the web for python 3.13", "web_search", query="python 3.13", engine="google")
+        self.check("search youtube for lofi beats", "web_search", query="lofi beats", engine="youtube")
+        self.check("search wikipedia for ada lovelace", "web_search", query="ada lovelace",
+                   engine="wikipedia")
+        self.check("google best coffee in trichy", "web_search", query="best coffee in trichy")
+
+    def test_memory_phrases_are_not_hijacked(self):
+        self.assertIsNone(parse("search my notes for invoice"))
+        self.assertEqual(self.core.ask("search my notes for invoice").skill, "memory")
+
+    def test_action_exists_and_is_safe(self):
+        settings = Settings()
+        registry = build_actions(Controller(settings, simulate=True))
+        action = registry["web_search"]
+        self.assertEqual(action.risk, SAFE)
+        self.assertIn("query", action.params)
+
+
+class TestExampleCoverage(unittest.TestCase):
+    """Every action must be reachable from the phrase we advertise for it.
+
+    This is the machine-checkable half of “JARVIS can do anything on my computer
+    by voice”: if an action has no phrase to say, or its phrase falls through to
+    the fallback skill, the palette and the README are lying to the user.
+    """
+
+    def setUp(self) -> None:
+        self.home = Path(tempfile.mkdtemp(prefix="jarvis-examples-"))
+        self._previous = os.environ.get("JARVIS_HOME")
+        os.environ["JARVIS_HOME"] = str(self.home)
+        self.settings = Settings()
+        self.settings["dry_run"] = True           # rehearse: never touch the machine
+        self.settings["trust_level"] = "trusted"
+        self.settings["allow_dangerous"] = True
+        self.settings["provider"] = "offline"
+        self.settings["voice_replies"] = False
+        self.settings["learn_habits"] = False
+        self.memory = Memory()
+        self.host = HeadlessHost(verbose=False)
+        self.core = Core(self.settings, self.memory, self.host)
+
+    def tearDown(self) -> None:
+        self.core.shutdown()
+        if self._previous:
+            os.environ["JARVIS_HOME"] = self._previous
+        else:
+            os.environ.pop("JARVIS_HOME", None)
+
+    def test_every_action_has_an_example(self):
+        missing = [name for name, action in self.core.actions.actions.items() if not action.examples]
+        self.assertEqual(missing, [], f"actions with no spoken example: {missing}")
+
+    def test_every_example_reaches_a_route(self):
+        misses = []
+        for name, action in sorted(self.core.actions.actions.items()):
+            phrase = action.examples[0]
+            self.core.actions.recent.clear()
+            response = self.core.ask(phrase)
+            ran = [entry["action"] for entry in self.core.actions.recent]
+            if not ran and response.skill in ("fallback", "", None):
+                misses.append((name, phrase))
+        self.assertEqual(misses, [], f"phrases nothing understood: {misses}")
+
+
+class TestPhraseRegressions(ControlTestCase):
+    """Phrasings that used to be swallowed by an older, clumsier rule."""
+
+    def test_volume_question_is_not_a_mute(self):
+        self.check("what's the volume", "get_volume")
+        self.check("what is my brightness", "get_brightness")
+
+    def test_volume_direction_and_amount(self):
+        self.check("volume down 15", "nudge_volume", delta=-15)
+        self.check("turn the volume up by 20", "nudge_volume", delta=20)
+        self.check("volume 30", "set_volume", level=30)
+
+    def test_mute_stays_on_the_mute_action(self):
+        self.check("mute", "mute_control", action="on")
+        self.check("unmute", "mute_control", action="off")
+        self.check("toggle mute", "mute_control", action="toggle")
+
+    def test_write_and_say_are_not_typing(self):
+        self.check("save hello to notes.txt", "write_file", path="notes.txt", content="hello")
+        self.check("write hello to notes.txt", "append_file", path="notes.txt", content="hello")
+        self.check("say good morning", "speak", text="good morning")
+
+    def test_names_stay_openable(self):
+        self.check("open Report Final.PDF", "open_path", path="Report Final.PDF")
+        self.check("open github.com", "open_url")
+        self.check("open the folder downloads", "open_path")
+        self.check("move my mouse to 100,200", "move_mouse", x=100, y=200)
+
+
+class TestAssistantPhrases(ControlTestCase):
+    """The two escape hatches: asking a question, and handing work to a skill."""
+
+    def test_ask_me_is_a_prompt(self):
+        self.check("ask me for the invoice number", "ask_user", prompt="For the invoice number?")
+
+    def test_run_skill_rewrites_the_question(self):
+        self.check("ask yourself what the time is", "run_skill", text="what is the time")
+
+    def test_named_list_goes_to_a_file(self):
+        parsed = parse("add milk to my shopping list")
+        self.assertEqual(parsed[0], "append_file")
+        self.assertTrue(parsed[1]["path"].endswith("shopping-list.md"))

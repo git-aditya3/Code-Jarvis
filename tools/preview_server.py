@@ -347,8 +347,17 @@ async function ask() {
 document.getElementById('send').onclick = ask;
 document.getElementById('q').addEventListener('keydown', e => { if (e.key === 'Enter') ask(); });
 fetch('/api/info').then(r => r.json()).then(d => {
-  document.getElementById('ver').textContent = 'v' + d.version + ' · ' + d.skills + ' skills · ' +
-      (d.actions ? d.actions + ' computer actions · ' : '') + d.brain;
+  const learned = d.learned || {};
+  const bits = [
+    'v' + d.version,
+    d.skills + ' skills',
+    d.actions + ' computer actions',
+    d.routines + ' routines',
+    (learned.distinct_actions || 0) + ' learned actions',
+    (learned.trusted || 0) + ' learned approvals',
+  ];
+  document.getElementById('ver').textContent = bits.join(' · ');
+  document.getElementById('ver').title = d.brain + '  |  ladder: ' + (d.ladder || []).join(' → ');
 });
 </script>
 </body>
@@ -359,14 +368,23 @@ fetch('/api/info').then(r => r.json()).then(d => {
 def build_info() -> dict:
     global CORE, INFO
     actions = getattr(CORE, "actions", None)
+    profile = getattr(CORE, "profile", None)
+    routines = getattr(CORE, "routine_store", None)
     INFO = {
         "version": VERSION,
         "skills": len(CORE.registry.skills),
         "actions": len(actions.actions) if actions is not None else 0,
         "control": (actions.controller.report_text().strip().splitlines()[:2] if actions else []),
         "brain": CORE.brain.status(),
+        "provider": CORE.brain.provider,
+        "model": CORE.settings.model_for(),
+        "ladder": CORE.brain.ladder(),
+        "free": not CORE.brain.settings.has_key(CORE.brain.provider),
+        "routines": len(routines.all()) if routines is not None else 0,
+        "learned": (profile.stats() if profile is not None else {}),
         "data_dir": str(jarvis_home()),
-        "score": "Preview server: HUD frames from Qt + live skill routing + computer control.",
+        "score": ("Preview server: HUD frames from Qt + live skill routing + 76 computer actions "
+                  "+ a free cloud brain with behaviour learning."),
     }
     return INFO
 

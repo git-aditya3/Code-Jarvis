@@ -881,7 +881,9 @@ class MediaSkill(Skill):
     description = "volume, mute and playback control"
     examples = ("volume up", "mute", "next track")
     patterns = (
-        (r"\b(volume|sound)\s*(up|down|louder|quieter|increase|decrease)?\b", 0.9),
+        # A direction is required: reading or setting a level is the control
+        # layer's job (it can report the number, and it is audited).
+        (r"\b(volume|sound)\s+(up|down|louder|quieter|increase|decrease)\b", 0.9),
         (r"\b(mute|unmute)\b", 0.95),
         (r"\b(next|previous|skip) (track|song)\b", 0.9),
         (r"\b(pause|resume|play) (music|song|track|audio|media)\b", 0.9),
@@ -1160,6 +1162,8 @@ class NotesSkill(Skill):
         (r"\bwhat (do you remember|did i tell you|do you know) about\b", 0.92),
         (r"\bforget (about )?\b", 0.9),
         (r"\b(add|create|new) (a )?(task|todo|to-do|reminder)\b", 0.92),
+        # “add milk to my todo list” / “put the invoice on my task list”
+        (r"\b(add|put)\b.+\bto (my |the )?(todo|to-do|task)s? list\b", 0.95),
         (r"\b(my|list|show|what are my) (tasks|todos|to-dos|reminders)\b", 0.92),
         (r"\b(mark|complete|finish|done with)\b.*\b(task|todo|\d)\b", 0.85),
         (r"\b(delete|remove) (task|note)\b", 0.85),
@@ -1219,9 +1223,11 @@ class NotesSkill(Skill):
                 speak=f"I remember {stats['facts']} facts about you and {stats['tasks_open']} open tasks.",
             )
 
-        # add task
-        match = re.search(r"\b(?:add|create|new) (?:a )?(?:task|todo|to-do|reminder)\s*(?:to|:)?\s*(.+)$",
-                          text, flags=re.IGNORECASE)
+        # add task — “add a task: call the bank” or “add milk to my todo list”
+        match = (re.search(r"\b(?:add|create|new) (?:a )?(?:task|todo|to-do|reminder)\s*(?:to|:)?\s*(.+)$",
+                           text, flags=re.IGNORECASE)
+                 or re.search(r"\b(?:add|put)\s+(.+?)\s+(?:to|on)\s+(?:my\s+|the\s+)?"
+                              r"(?:todo|to-do|task)s?\s+list\b", text, flags=re.IGNORECASE))
         if match:
             task = memory.add_task(match.group(1).strip(" ."))
             ctx.host.refresh_memory()
