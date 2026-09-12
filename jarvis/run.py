@@ -6,6 +6,10 @@ Entry point for JARVIS.
     python run_jarvis.py --chat              # terminal chat loop
     python run_jarvis.py --doctor            # environment + voice diagnostics
     python run_jarvis.py --skills            # list every skill
+    python run_jarvis.py --actions           # everything JARVIS can do to the machine
+    python run_jarvis.py --routines          # routines saved in memory
+    python run_jarvis.py --audit             # what JARVIS actually did
+    python run_jarvis.py --dry-run --ask "open chrome, then set the volume to 20"
 """
 
 from __future__ import annotations
@@ -34,11 +38,21 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--chat", action="store_true", help="terminal chat loop")
     mode.add_argument("--skills", action="store_true", help="list available skills")
     mode.add_argument("--doctor", action="store_true", help="check dependencies and voice support")
+    mode.add_argument("--actions", action="store_true",
+                      help="list every action JARVIS can perform on this machine")
+    mode.add_argument("--routines", action="store_true", help="list routines saved in memory")
+    mode.add_argument("--audit", action="store_true", help="show the action log (what JARVIS did)")
     parser.add_argument("--provider", choices=list(PROVIDER_LABELS), help="override the brain for this run")
     parser.add_argument("--model", help="override the model name")
     parser.add_argument("--no-voice", action="store_true", help="never speak, even if voice is configured")
     parser.add_argument("--wake", action="store_true", help="start wake-word listening on launch")
     parser.add_argument("--data-dir", help="use a different folder for settings/memory")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="rehearse commands without touching the machine")
+    parser.add_argument("--yes", action="store_true",
+                        help="trust mode: only destructive actions ask for confirmation")
+    parser.add_argument("--allow-dangerous", action="store_true",
+                        help="permit destructive actions (still asks, unless --yes too)")
     parser.add_argument("--version", action="version", version=f"JARVIS {VERSION}")
     return parser
 
@@ -59,6 +73,12 @@ def make_core(args: argparse.Namespace, host=None) -> Core:
         settings["voice_replies"] = False
     if getattr(args, "wake", False):
         settings["wake_word_enabled"] = True
+    if getattr(args, "dry_run", False):
+        settings["dry_run"] = True
+    if getattr(args, "yes", False):
+        settings["trust_level"] = "trusted"
+    if getattr(args, "allow_dangerous", False):
+        settings["allow_dangerous"] = True
     settings.save()
     memory = Memory()
     return Core(settings, memory, host or HeadlessHost(verbose=False))
@@ -67,6 +87,8 @@ def make_core(args: argparse.Namespace, host=None) -> Core:
 # ── CLI modes ────────────────────────────────────────────────────────────────
 
 def cmd_ask(args: argparse.Namespace) -> int:
+    # One-shot: nothing can approve a risky action, so they are refused unless
+    # the run was started with --yes.
     host = HeadlessHost(verbose=False)
     core = make_core(args, host)
     response = core.ask(args.ask)
@@ -77,7 +99,8 @@ def cmd_ask(args: argparse.Namespace) -> int:
 
 
 def cmd_chat(args: argparse.Namespace) -> int:
-    host = HeadlessHost(verbose=False)
+    # Interactive: risky actions are approved right here in the terminal.
+    host = HeadlessHost(verbose=False, interactive=True)
     core = make_core(args, host)
     print(f"JARVIS {VERSION} — type /help for commands, /quit to exit.")
     print(f"brain: {core.brain.status()}\n")
@@ -106,7 +129,67 @@ def cmd_skills(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_actions(args: argparse.Namespace) -> int:
+    core = make_core(args)
+    if core.actions is None:
+        print("Computer control is disabled in settings.")
+        core.shutdown()
+        return 1
+    print(core.controller.report_text())
+    print()
+    print(core.actions.catalogue())
+    print("\nRoutines: run --routines to see what memory holds, or say “what routines do I have”.")
+    core.shutdown()
+    return 0
+
+
+def cmd_routines(args: argparse.Namespace) -> int:
+    core = make_core(args)
+    if core.routine_store is None:
+        print("Computer control (and therefore routines) is disabled in settings.")
+        core.shutdown()
+        return 1
+    routines = core.routine_store.all()
+    if not routines:
+        print("No routines saved yet.\n")
+        print("Teach one by voice:  “watch what I do”, perform the steps, then “save that as work session”.")
+        core.shutdown()
+        return 0
+    print(f"{len(routines)} routine(s) in {core.memory.path}:\n")
+    for routine in routines:
+        print(routine.summary(core.actions))
+        print(routine.outline(core.actions))
+        print()
+    core.shutdown()
+    return 0
+
+
+def cmd_audit(args: argparse.Namespace) -> int:
+    core = make_core(args)
+    if core.audit is None:
+        print("Computer control is disabled in settings.")
+        core.shutdown()
+        return 1
+    entries = core.audit.tail(40)
+    if not entries:
+        print(f"Nothing logged yet. The log lives at {core.audit.path}")
+        core.shutdown()
+        return 0
+    marks = {"done": "✓", "failed": "✗", "refused": "⛔", "declined": "·", "auto": "·"}
+    print(f"Action log — {core.audit.path}\n")
+    for entry in entries:
+        args_text = ", ".join(f"{key}={value}" for key, value in list((entry.get("args") or {}).items())[:3])
+        print(f"  {marks.get(str(entry.get('outcome')), '·')} {entry.get('when', '')}  "
+              f"{entry.get('action', ''):16} [{entry.get('risk', '')}] "
+              f"{'simulated ' if entry.get('simulated') else ''}{args_text}")
+        if entry.get("message"):
+            print(f"      {str(entry['message'])[:120]}")
+    core.shutdown()
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
+    from .control import control_install_hints
     from .voice import VOICE_INSTALL_HINT, probe
 
     settings = Settings()
@@ -175,6 +258,25 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print("\n" + VOICE_INSTALL_HINT)
 
     print(f"\nSkills loaded : {len(core.registry.skills)}")
+
+    # ── computer control ─────────────────────────────────────────────────
+    if core.actions is None:
+        print("Control       : disabled in settings (control_enabled = false)")
+    else:
+        caps = core.controller.report()
+        ready = [name for name, cap in caps.capabilities.items() if cap.available]
+        missing = [name for name, cap in caps.capabilities.items() if not cap.available]
+        print(f"Control       : {len(core.actions.actions)} actions · backend "
+              f"{caps.backend}{' · SIMULATION' if caps.simulated else ''}")
+        print(f"  ready       : {', '.join(ready) or 'nothing'}")
+        if missing:
+            print(f"  needs setup : {', '.join(missing)}")
+            for hint in control_install_hints():
+                print(f"    • {hint}")
+        print(f"  trust level : {core.settings.get('trust_level')} "
+              f"(destructive actions {'allowed' if core.settings.get('allow_dangerous') else 'blocked'})")
+        print(f"  audit log   : {core.audit.path}")
+        print(f"  routines    : {len(core.routine_store.all())} saved in memory")
     core.shutdown()
     return 0
 
@@ -236,6 +338,12 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_skills(args)
     if args.doctor:
         return cmd_doctor(args)
+    if args.actions:
+        return cmd_actions(args)
+    if args.routines:
+        return cmd_routines(args)
+    if args.audit:
+        return cmd_audit(args)
     return cmd_gui(args)
 
 

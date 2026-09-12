@@ -66,6 +66,12 @@ def stylesheet(accent: str = "cyan") -> str:
         border: 1px solid {BASE['border']};
         border-radius: 14px;
     }}
+    #Window QDialog, #ConfirmDialog {{
+        background: {BASE['bg']};
+        border: 1px solid {BASE['border']};
+        border-radius: 12px;
+    }}
+    #ConfirmDialog QLabel, #ConfirmDialog QCheckBox {{ color: {BASE['text']}; }}
     #TitleBar {{ background: transparent; }}
     #TitleText {{
         font-size: 14px;

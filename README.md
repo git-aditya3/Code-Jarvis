@@ -19,6 +19,8 @@ assistant starts answering open-ended questions too.
 - [Voice setup](#voice-setup)
 - [Adding a language model (optional)](#adding-a-language-model-optional)
 - [The skills](#the-skills)
+- [Computer control](#computer-control)
+- [Routines and habits](#routines-and-habits)
 - [Developer tools](#developer-tools)
 - [Command line](#command-line)
 - [Where your data lives](#where-your-data-lives)
@@ -46,6 +48,9 @@ assistant starts answering open-ended questions too.
 | 🌤 **Weather** | *"will it rain today in Chennai"* — Open-Meteo, no key needed. |
 | 📚 **Knowledge** | *"who was Ada Lovelace"* — Wikipedia summaries offline-safe, or the LLM when configured. |
 | 🖥 **System** | *"system status"*, *"how much battery is left"*, *"top processes"*, *"free up my disk"* info. |
+| 🖱 **Computer control** | *"open chrome"*, *"type hello world"*, *"press save"*, *"click the save button"*, *"snap chrome to the left"*, *"next song"*, *"turn off wifi"*, *"lock my screen"*. |
+| 🧩 **Plans** | *"open chrome, then set the volume to 20, then read my screen"* — run in order, with the plan shown for approval when it is long. |
+| 🔁 **Routines** | *"watch what I do"* … *"save that as work session"* … *"run my work session"*. Learned habits are offered back to you. |
 | 🎛 **Media & apps** | *"volume up"*, *"open chrome"*, *"search youtube for lofi beats"*. |
 | 📋 **Clipboard & screen** | *"what's on my clipboard"*, *"take a screenshot"*. |
 | 🗂 **Files & repos** | *"find file config.json"*, *"how big is ~/projects"*, *"git status"*, *"list the TODOs in this repo"*. |
@@ -162,9 +167,10 @@ There is **no key in the source code** — see [Security note](#security-note).
 
 ## The skills
 
-24 skills ship by default. Run `--skills` or `/help` for the live list; each one is a small class
-in [`jarvis/skills.py`](jarvis/skills.py) and [`jarvis/dev_skills.py`](jarvis/dev_skills.py) that
-declares regex patterns, a weight and a `run()` method, so adding your own is a dozen lines.
+27 skills ship by default. Run `--skills` or `/help` for the live list; each one is a small class
+in [`jarvis/skills.py`](jarvis/skills.py), [`jarvis/dev_skills.py`](jarvis/dev_skills.py) and
+[`jarvis/control_skills.py`](jarvis/control_skills.py) that declares regex patterns, a weight and a
+`run()` method, so adding your own is a dozen lines.
 
 | Skill | Ask it |
 | --- | --- |
@@ -186,6 +192,101 @@ declares regex patterns, a weight and a `run()` method, so adding your own is a 
 | Project insight | `git status`, `what changed in this repo`, `list the TODOs` |
 | Environment | `what python am i running`, `is docker installed` |
 | Diagnostics | `status`, `/status` |
+
+## Computer control
+
+JARVIS can drive the machine it runs on — **75 actions**, all reachable by voice, from the
+command line, or as a step inside a plan or routine. Every one of them reports honestly what it
+did, and everything risky passes a policy check first.
+
+| Group | Things you can say |
+| --- | --- |
+| **Apps** | *"open chrome"*, *"switch to slack"*, *"close spotify"*, *"what apps are open"*, *"open my downloads"*, *"open notes.pdf"* |
+| **Windows** | *"minimise chrome"*, *"maximise this window"*, *"make this window fullscreen"*, *"snap chrome to the left"*, *"keep chrome on top"*, *"show me the desktop"*, *"go to workspace 2"*, *"move chrome to 0,0 1920x1080"*, *"next window"* |
+| **Keyboard** | *"type hello world"*, *"press ctrl+shift+t"*, *"press save"*, *"hit undo"*, *"press print"*, *"what shortcuts do you know"* |
+| **Mouse** | *"click"*, *"double click"*, *"right click"*, *"click at 400,300"*, *"drag from 100,100 to 500,400"*, *"scroll down 5"*, *"where's the pointer"*, *"click the save button"* (finds the label on screen with OCR and clicks it) |
+| **Screen** | *"read my screen"*, *"take a screenshot"*, *"find the save button on my screen"*, *"copy what's on my screen"*, *"what's my screen resolution"* |
+| **Sound & display** | *"set the volume to 30"*, *"volume down 15"*, *"mute"*, *"next song"*, *"pause"*, *"brightness 40"*, *"dim the screen"*, *"make the screen brighter"* |
+| **System** | *"lock my screen"*, *"sleep"*, *"shut down"*, *"restart"*, *"log out"*, *"turn off wifi"*, *"turn on dark mode"*, *"enable night light"*, *"power saving mode"*, *"empty the trash"*, *"open a terminal"* |
+| **Processes** | *"what's running"*, *"is chrome running"*, *"kill spotify"*, *"start notepad"* |
+| **Files** | *"list files in ~/Downloads"*, *"find all pdf files in downloads"*, *"read notes.txt"*, *"add buy milk to ~/todo.txt"*, *"make a folder called drafts"*, *"copy a.txt to ~/Documents"*, *"rename report.md to final.md"*, *"duplicate report.md"*, *"zip ~/project"*, *"extract backup.zip"*, *"delete ~/junk.txt"*, *"how big is that folder"*, *"how much disk space is left"* |
+| **Clipboard & memory** | *"read my clipboard"*, *"copy hello to my clipboard"*, *"what did i copy earlier"*, *"put back what i copied"*, *"remember my locker code is 4417"*, *"note that …"*, *"add task …"* |
+| **Shell** | *"run git status"*, *"run ls -la"*, *"run the command docker compose up"*, *"in the terminal run make test"* |
+| **Assistant** | *"what can you control"*, *"what did you just do"*, *"notify me the build finished"*, *"say good morning"*, *"remind me in 10 minutes"* |
+
+Multi-step requests become **plans**: *"open chrome, then set the volume to 20, then read my
+screen"*. Each step is parsed offline, the whole plan is shown before it runs when it has six or
+more steps, and every step still goes through the policy check. If a clause cannot be parsed and
+you have configured a language model, JARVIS asks it for a JSON plan — validated against the
+action registry, so a model can *suggest* a step but never invent one.
+
+![Approval dialog](docs/jarvis-approval.png)
+
+### Safety
+
+Control is powerful, so the rules are explicit and visible in code
+([`jarvis/actions.py`](jarvis/actions.py)):
+
+| Tier | Meaning |
+| --- | --- |
+| `safe` | reading and reporting: list windows, read the clipboard, get the volume |
+| `confirm` | changes something ordinary: typing, clicking, opening, moving files |
+| `dangerous` | destructive or system-wide: shutdown, deleting, emptying the trash, running a shell |
+| `refused` | never runs: disk formatting, `rm -rf /`, fork bombs, `curl … \| sh`, password stores |
+
+- **Trust level** (`ask_all` / `ask_risky` / `trusted`) decides how often you are asked.
+  Dangerous actions always ask, and need “Allow destructive actions” switched on as well.
+- **Every decision is logged** to `~/.jarvis/audit.log` (JSONL: action, redacted arguments,
+  risk, outcome), so *"what did you just do"* is always answerable.
+- **Sensitive paths** (`~/.ssh`, `~/.aws`, keychains, browser credential stores) and **system
+  directories** (`/usr`, `/etc`, `C:\Windows`, `/System`, …) cannot be written to or deleted.
+- **Fail closed**: if the front-end cannot ask you, the action is refused rather than run.
+- **Dry run** (`--dry-run`, or the Settings checkbox) rehearses a whole routine without touching
+  the machine — every reply is marked `[simulation]`.
+- **Voice-only mode**: with *Ask out loud for risky actions* enabled, JARVIS says what it wants to
+  do and waits for a spoken “yes” (or “no”) instead of showing a dialog.
+- Clipboard history deliberately **drops anything that looks like a key or token**.
+
+### What each platform needs
+
+```bash
+python -m jarvis --doctor      # shows what is ready and what needs installing
+```
+
+| Platform | Backends used | Install |
+| --- | --- | --- |
+| Linux (X11) | `xdotool`, `wmctrl`, `pactl`/`amixer`, `brightnessctl`, `playerctl`, `nmcli` | `sudo apt install xdotool wmctrl pulseaudio-utils brightnessctl` |
+| macOS | built-in `osascript`, `screencapture`, `networketup`; optional `cliclick` | grant Accessibility + Screen Recording |
+| Windows | `ctypes` SendInput, PowerShell; optional `pycaw` for exact volume levels | `pip install pycaw` |
+| Screen reading | `tesseract-ocr` + `pytesseract` | `sudo apt install tesseract-ocr` |
+| Mouse/keyboard (headless Linux) | needs an X11/XWayland session | — |
+
+Anything the machine cannot do is reported as such — JARVIS says *why* and what to install rather
+than pretending the action worked.
+
+## Routines and habits
+
+Complex tasks are worth remembering.
+
+```text
+you › watch what I do
+you › open chrome
+you › set the volume to 20
+you › run git status
+you › stop recording
+you › save that as morning setup
+you › run my morning setup          # any time, by voice
+```
+
+- A recording of two or more steps can be **saved as a named routine** and stored in memory
+  (`~/.jarvis/memory.json`), so it survives restarts and shows up in the Memory tab.
+- JARVIS also **watches for habits**: do the same two or three things together a couple of times
+  and it offers to save them as a routine. *"what have you noticed"* asks on demand, and
+  *"delete routine morning setup"* forgets one.
+- Routines run through the same safety layer as single actions: long routines are shown for
+  approval first, and each step that needs confirmation still asks.
+- Rehearsals stay out of the habit data: with dry-run on, the steps you *teach* are recorded, but
+  nothing you merely simulate counts as something you do often.
 
 ## Developer tools
 
@@ -234,6 +335,9 @@ Everything is local, in `~/.jarvis` (override with `JARVIS_HOME`):
 ~/.jarvis/
 ├── settings.json      user preferences (0600 — includes any saved API key)
 ├── memory.json        notes, tasks, facts, conversation history
+├── audit.log          every action JARVIS took, with redacted arguments
+├── routines.json      recently observed steps (habit detection)
+├── clipboard.json     the last 20 clipboard entries (secrets are skipped)
 ├── diagrams/          generated .mmd / .dot / .png flowcharts
 ├── synthetic/         generated datasets
 └── screenshots/       captured screenshots
@@ -276,13 +380,15 @@ aloud, and stored in conversation history for the next turn's context.
 ## Tests and linting
 
 ```bash
-python -m unittest discover -s tests -v    # 44 tests, no network, no real home dir touched
+python -m unittest discover -s tests -v    # 128 tests, no network, no real home dir touched
 ruff check .                               # configured in pyproject.toml
 ```
 
 The suite covers routing and skill selection, memory persistence, timer firing, the analyser rule
 set, deterministic dataset generation, flowchart generation, wake-word matching, the safe
-arithmetic evaluator, settings/key handling and the `Host` contract.
+arithmetic evaluator, settings/key handling and the `Host` contract — plus the control layer: the
+phrase grammar, the policy tiers, dry-run execution, the audit log, plan parsing, routine
+recording and replay, habit detection, the GUI thread marshaller and zip-slip protection.
 
 ## Troubleshooting
 
@@ -296,6 +402,8 @@ arithmetic evaluator, settings/key handling and the `Host` contract.
 | No PNG for flowcharts | `pip install graphviz` **and** the system Graphviz (`dot`) — Mermaid output works without it |
 | Weather fails | No internet, or a city name Open-Meteo cannot geocode — try a larger nearby city |
 | Where is my data? | `~/.jarvis`; open it from Settings → Data |
+| "I cannot … windows" | Install the helpers: `python -m jarvis --doctor` says exactly what is missing |
+| Actions do nothing | They may be in dry-run mode — the status bar shows `DRY RUN` |
 
 ## Security note
 
@@ -317,8 +425,8 @@ How JARVIS handles secrets now:
 ## Roadmap
 
 - [ ] Wake-word model with an always-on low-power detector (currently energy-gated listening)
-- [ ] Screen-aware mode: optional OCR review of code visible on screen (the original
-      `code assistance.py` idea, reborn as a skill rather than the whole app)
+- [x] Computer control by voice (75 actions, plans, routines, audit log)
+- [x] Screen reading and OCR clicking (`read my screen`, `click the save button`)
 - [ ] Calendar and email skills (ICS first, so it stays key-free)
 - [ ] Plugin folder so third-party skills can be dropped in without editing the repo
 - [ ] Packaging: `pipx install code-jarvis`, plus a standalone PyInstaller build
