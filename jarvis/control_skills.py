@@ -131,9 +131,11 @@ class ControlSkill(_ControlBase):
         # routine memory. Everything the parser cannot handle still falls through
         # to the original skills.
         (r"^(?:please\s+)?(?:open|launch|start|focus|switch to|activate)\s+\S", 0.96),
-        # “run git status” belongs to the project skill (0.95); a bare command
-        # still comes here because the old launcher only scores 0.85 for it.
-        (r"^(?:run|execute)\s+\S", 0.90),
+        # “run git status” belongs to the project skill (0.95, repository aware);
+        # anything else typed after “run” is an explicit request for the shell, so
+        # it scores just above the environment skill (0.92) and the launcher
+        # (0.85) — and it is the version that audits and confirms.
+        (r"^(?:run|execute)\s+\S", 0.92),
         (r"^(?:please\s+)?(?:close|quit|minimi[sz]e|maximi[sz]e)\s+\S", 0.96),
         # “write down …” is a note for the memory skill, not typing into a window.
         (r"^(?:type|write)\s+(?!down\b|a\s+note\b|about\b|a\s+reminder\b)\S", 0.96),

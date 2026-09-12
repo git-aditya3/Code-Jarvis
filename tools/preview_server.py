@@ -347,7 +347,8 @@ async function ask() {
 document.getElementById('send').onclick = ask;
 document.getElementById('q').addEventListener('keydown', e => { if (e.key === 'Enter') ask(); });
 fetch('/api/info').then(r => r.json()).then(d => {
-  document.getElementById('ver').textContent = 'v' + d.version + ' · ' + d.skills + ' skills · ' + d.brain;
+  document.getElementById('ver').textContent = 'v' + d.version + ' · ' + d.skills + ' skills · ' +
+      (d.actions ? d.actions + ' computer actions · ' : '') + d.brain;
 });
 </script>
 </body>
@@ -357,12 +358,15 @@ fetch('/api/info').then(r => r.json()).then(d => {
 
 def build_info() -> dict:
     global CORE, INFO
+    actions = getattr(CORE, "actions", None)
     INFO = {
         "version": VERSION,
         "skills": len(CORE.registry.skills),
+        "actions": len(actions.actions) if actions is not None else 0,
+        "control": (actions.controller.report_text().strip().splitlines()[:2] if actions else []),
         "brain": CORE.brain.status(),
         "data_dir": str(jarvis_home()),
-        "score": "Preview server: HUD frames from Qt + live skill routing.",
+        "score": "Preview server: HUD frames from Qt + live skill routing + computer control.",
     }
     return INFO
 
