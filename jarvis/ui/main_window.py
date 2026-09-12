@@ -23,6 +23,7 @@ without importing Qt themselves.
 from __future__ import annotations
 
 import html
+import json
 import re
 import threading
 import time
@@ -46,6 +47,8 @@ from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -66,6 +69,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..actions import TRUST_LABELS
 from ..config import (
     PROVIDER_LABELS,
     PROVIDER_MODELS,
@@ -73,6 +77,7 @@ from ..config import (
     Settings,
     jarvis_home,
 )
+from ..control import control_install_hints
 from ..core import Core, Response
 from ..host import open_with_os
 from ..memory import Memory
@@ -104,7 +109,7 @@ class MainThreadInvoker(QObject):
 
     def _run(self, token: int) -> None:
         with self._lock:
-            job = self._jobs.pop(token, None)
+            job = self._jobs.get(token)
         if job is None:
             return
         try:
@@ -113,7 +118,10 @@ class MainThreadInvoker(QObject):
             job["error"] = exc
         finally:
             if job["event"] is not None:
-                job["event"].set()
+                job["event"].set()          # the caller picks the result up itself
+            else:
+                with self._lock:            # fire-and-forget jobs must not pile up
+                    self._jobs.pop(token, None)
 
     def call(self, fn: Callable[..., Any], *args: Any, blocking: bool = False, timeout: float = 10.0) -> Any:
         app = QApplication.instance()
@@ -127,11 +135,11 @@ class MainThreadInvoker(QObject):
         self.request.emit(token)
         if not blocking:
             return None
-        event.wait(timeout)
+        arrived = event.wait(timeout)
         with self._lock:
             job = self._jobs.pop(token, None)
-        if job is None:
-            return None
+        if job is None or not arrived:
+            return None                      # timed out: the answer never came
         if job["error"] is not None:
             raise job["error"]
         return job["result"]
@@ -292,7 +300,84 @@ def render_message(text: str, role: str = "jarvis", accent: str = "cyan",
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  The window
+#  Approval dialog for computer-control actions
+# ════════════════════════════════════════════════════════════════════════════
+
+#: How each risk tier is presented. The wording matters as much as the colour —
+#: “destructive” has to look different from “this changes something”.
+RISK_STYLE = {
+    "safe": ("JARVIS wants to do something", "#39d0ff", "Do it"),
+    "confirm": ("JARVIS needs your approval", "#ffb347", "Do it"),
+    "dangerous": ("Careful — this cannot be undone", "#ff5f6d", "Yes, I understand"),
+}
+
+
+class ConfirmDialog(QDialog):
+    """Ask the user to approve one action before JARVIS performs it.
+
+    It shows exactly what will run, in the same words the audit log will use, so an
+    approval is never a guess. Dangerous actions get a red frame and a button that
+    spells out the consequence, and “No” is the default button in every case.
+    """
+
+    def __init__(self, title: str, detail: str, risk: str = "confirm",
+                 parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("ConfirmDialog")          # so it gets the app's dark skin too
+        heading, colour, accept_label = RISK_STYLE.get(risk, RISK_STYLE["confirm"])
+        self.setWindowTitle("JARVIS — approval needed")
+        self.setModal(True)
+        self.setMinimumWidth(460)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(10)
+
+        badge = QLabel(heading.upper())
+        badge.setStyleSheet(f"color: {colour}; font-weight: 600; letter-spacing: 1px;")
+        layout.addWidget(badge)
+
+        headline = QLabel(title)
+        headline.setWordWrap(True)
+        headline.setStyleSheet("font-size: 15px; font-weight: 600;")
+        layout.addWidget(headline)
+
+        body = QTextBrowser()
+        body.setPlainText(detail)
+        body.setStyleSheet(
+            f"border: 1px solid {colour}; border-radius: 6px; "
+            "background: rgba(255,255,255,0.03); padding: 6px;"
+        )
+        body.setMinimumHeight(90)
+        body.setMaximumHeight(280)
+        layout.addWidget(body)
+
+        hint = QLabel("Choose “No” and nothing happens. Every decision is written to the audit log.")
+        hint.setObjectName("Hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.trust_check = QCheckBox("Stop asking me about ordinary (non-destructive) actions")
+        self.trust_check.setVisible(risk == "confirm")
+        layout.addWidget(self.trust_check)
+
+        buttons = QDialogButtonBox()
+        approve = buttons.addButton(accept_label, QDialogButtonBox.ButtonRole.AcceptRole)
+        text_colour = "#06121b" if risk != "dangerous" else "#ffffff"
+        approve.setStyleSheet(f"background: {colour}; color: {text_colour}; font-weight: 700; "
+                              "padding: 6px 14px; border-radius: 6px;")
+        decline = buttons.addButton("No", QDialogButtonBox.ButtonRole.RejectRole)
+        decline.setDefault(True)          # the safe choice is the default
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @property
+    def trust_requested(self) -> bool:
+        return bool(self.trust_check.isVisible() and self.trust_check.isChecked())
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  The assistant window
 # ════════════════════════════════════════════════════════════════════════════
 
 class JarvisWindow(QWidget):
@@ -718,6 +803,60 @@ class JarvisWindow(QWidget):
         self.startup_check.stateChanged.connect(lambda state: self.save_setting("connect_on_launch", bool(state)))
         ui_layout.addRow("", self.startup_check)
 
+        # ── computer control ─────────────────────────────────────────────
+        control_box = QFrame()
+        control_box.setObjectName("PanelAlt")
+        control_layout = QVBoxLayout(control_box)
+        control_layout.setContentsMargins(12, 10, 12, 12)
+        control_layout.setSpacing(8)
+
+        self.trust_combo = QComboBox()
+        for key, label in TRUST_LABELS.items():
+            self.trust_combo.addItem(label, key)
+        self.trust_combo.currentIndexChanged.connect(
+            lambda: self.save_setting("trust_level", self.trust_combo.currentData())
+        )
+        trust_row = QFormLayout()
+        trust_row.addRow("Ask before acting", self.trust_combo)
+        control_layout.addLayout(trust_row)
+
+        self.dangerous_check = QCheckBox("Allow destructive actions (delete, stop processes, shut down)")
+        self.dangerous_check.stateChanged.connect(
+            lambda state: self.save_setting("allow_dangerous", bool(state))
+        )
+        control_layout.addWidget(self.dangerous_check)
+
+        self.dry_run_check = QCheckBox("Rehearse instead of acting (dry run — nothing on this machine changes)")
+        self.dry_run_check.stateChanged.connect(self.on_dry_run_changed)
+        control_layout.addWidget(self.dry_run_check)
+
+        self.routine_watch_check = QCheckBox("Learn my habits and offer to save them as routines")
+        self.routine_watch_check.stateChanged.connect(
+            lambda state: self.save_setting("routine_watch", bool(state))
+        )
+        control_layout.addWidget(self.routine_watch_check)
+
+        self.voice_confirm_check = QCheckBox("Ask out loud for risky actions (answer “yes” with your voice)")
+        self.voice_confirm_check.stateChanged.connect(self.on_voice_confirm_changed)
+        control_layout.addWidget(self.voice_confirm_check)
+
+        self.control_status = QLabel("")
+        self.control_status.setObjectName("Hint")
+        self.control_status.setWordWrap(True)
+        control_layout.addWidget(self.control_status)
+
+        control_buttons = QHBoxLayout()
+        show_actions = QPushButton("What can you control?")
+        show_actions.clicked.connect(lambda: self.submit("what can you control"))
+        control_buttons.addWidget(show_actions)
+        show_audit = QPushButton("Action history")
+        show_audit.clicked.connect(lambda: self.submit("show the action log"))
+        control_buttons.addWidget(show_audit)
+        control_buttons.addStretch(1)
+        control_layout.addLayout(control_buttons)
+
+        layout.addWidget(self._section("COMPUTER CONTROL", control_box))
+
         layout.addWidget(self._section("INTERFACE", ui_box))
 
         # ── data ─────────────────────────────────────────────────────────
@@ -846,6 +985,25 @@ class JarvisWindow(QWidget):
         self.opacity_slider.setValue(int(float(self.settings.get("opacity", 0.97)) * 100))
         self.opacity_slider.blockSignals(False)
         self.startup_check.setChecked(bool(self.settings.get("connect_on_launch", True)))
+
+        for widget, key, default in (
+            (self.trust_combo, "trust_level", "ask_risky"),
+            (self.dangerous_check, "allow_dangerous", False),
+            (self.dry_run_check, "dry_run", False),
+            (self.routine_watch_check, "routine_watch", True),
+            (self.voice_confirm_check, "voice_confirm", False),
+        ):
+            widget.blockSignals(True)
+            if isinstance(widget, QComboBox):
+                index = widget.findData(str(self.settings.get(key, default)))
+                widget.setCurrentIndex(index if index >= 0 else 0)
+            else:
+                widget.setChecked(bool(self.settings.get(key, default)))
+            widget.blockSignals(False)
+        core = getattr(self, "core", None)
+        if core is not None and getattr(core, "controller", None) is not None:
+            core.controller.set_simulation(bool(self.settings.get("dry_run", False)))
+        self.refresh_control_status()
 
         self.reload_voices()
         self.refresh_mic_list()
@@ -992,6 +1150,43 @@ class JarvisWindow(QWidget):
             self.stop_wake_listener()
         self.update_status_bar()
 
+    def on_voice_confirm_changed(self, state: int) -> None:
+        self.save_setting("voice_confirm", bool(state))
+        core = getattr(self, "core", None)
+        if core is not None and getattr(core, "actions", None) is not None:
+            core.actions.voice_confirm = bool(state)
+
+    def on_dry_run_changed(self, state: int) -> None:
+        self.save_setting("dry_run", bool(state))
+        core = getattr(self, "core", None)
+        if core is not None and getattr(core, "controller", None) is not None:
+            core.controller.set_simulation(bool(state))
+        self.refresh_control_status()
+
+    def refresh_control_status(self) -> None:
+        """One live line describing the control surface (capabilities, mode)."""
+        label = getattr(self, "control_status", None)
+        core = getattr(self, "core", None)
+        if label is None or core is None or getattr(core, "actions", None) is None:
+            if label is not None:
+                label.setText("Computer control is disabled in settings.")
+            return
+        report = core.controller.report()
+        ready = [name for name, cap in report.capabilities.items() if cap.available]
+        missing = [name for name, cap in report.capabilities.items() if not cap.available]
+        routines = len(core.routine_store.all()) if core.routine_store else 0
+        text = (f"{len(core.actions.actions)} actions · backend: {report.backend}"
+                + (" · DRY RUN" if report.simulated else "")
+                + f"\nready: {', '.join(ready) or 'nothing'}"
+                + f"\nroutines in memory: {routines}"
+                + f"\naudit log: {core.audit.path}")
+        if missing:
+            text += f"\nneeds setup: {', '.join(missing)}"
+            hints = control_install_hints()
+            if hints:
+                text += "\n" + "\n".join(f"• {hint}" for hint in hints)
+        label.setText(text)
+
     def on_accent_changed(self, accent: str) -> None:
         self.accent = accent
         self.save_setting("accent", accent)
@@ -1096,6 +1291,54 @@ class JarvisWindow(QWidget):
 
     def open_target(self, target: str, kind: str = "auto") -> bool:
         return open_with_os(target)
+
+    # ── approval: the human half of the safety policy ────────────────────
+    def confirm(self, title: str, detail: str, risk: str = "confirm") -> bool:
+        """Ask the user to approve a computer-control action.
+
+        This is called from worker threads (the core runs skills off the GUI
+        thread), so it marshals onto the GUI thread and *blocks* until the dialog
+        closes. Anything that goes wrong answers “no”: the policy fails closed.
+        """
+        def ask() -> bool:
+            dialog = ConfirmDialog(title, detail, risk, self)
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            if accepted and dialog.trust_requested:
+                self.save_setting("trust_level", "trusted")
+                self.apply_settings_to_ui()
+            return accepted
+
+        try:
+            return bool(self.invoker.call(ask, blocking=True, timeout=300))
+        except Exception:
+            return False
+
+    def ask_text(self, prompt: str, default: str = "") -> str | None:
+        """Free-text question for the ``ask_user`` action (used inside routines)."""
+        def ask() -> str | None:
+            dialog = QDialog(self)
+            dialog.setWindowTitle("JARVIS — one question")
+            dialog.setModal(True)
+            layout = QVBoxLayout(dialog)
+            label = QLabel(prompt)
+            label.setWordWrap(True)
+            layout.addWidget(label)
+            field = QLineEdit(default)
+            layout.addWidget(field)
+            buttons = QDialogButtonBox()
+            buttons.addButton("OK", QDialogButtonBox.ButtonRole.AcceptRole)
+            buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return None
+            return field.text()
+
+        try:
+            return self.invoker.call(ask, blocking=True, timeout=300)
+        except Exception:
+            return None
 
     def schedule(self, delay: float, callback: Callable[[], None]) -> Any:
         timer = QTimer(self)
@@ -1317,11 +1560,36 @@ class JarvisWindow(QWidget):
             item.setForeground(QColor("#4c5b78") if task.done else QColor("#dce7ff"))
             self.task_list.addItem(item)
         self.fact_list.clear()
+        routines: list[tuple[str, str]] = []
         for key, value in sorted(self.memory.facts.items()):
+            if key.startswith("routine."):
+                routines.append((key, value))          # shown below, not as raw JSON
+                continue
             item = QListWidgetItem(f"{key} = {value}")
             item.setData(Qt.ItemDataRole.UserRole, key)
             self.fact_list.addItem(item)
+        for key, value in routines:
+            summary = self._routine_summary(value)
+            item = QListWidgetItem(f"▶ {key} — {summary}")
+            item.setData(Qt.ItemDataRole.UserRole, key)
+            item.setForeground(QColor("#7ef0d0"))
+            self.fact_list.addItem(item)
         self.update_status_bar()
+
+    @staticmethod
+    def _routine_summary(payload: str) -> str:
+        """One readable line for a routine fact (the stored value is JSON)."""
+        try:
+            data = json.loads(payload)
+        except (ValueError, TypeError):
+            return "routine (unreadable entry)"
+        steps = data.get("steps") or []
+        origin = {"recorded": "recorded", "learned": "learned", "planned": "from a plan",
+                  "taught": "taught"}.get(str(data.get("source", "")), "saved")
+        runs = data.get("times_run") or 0
+        return (f"{len(steps)} steps · {origin}"
+                + (f" · run {runs}×" if runs else "")
+                + " · say “run my " + str(data.get("name", "")).split(" routine")[0] + "”")
 
     def add_memory_entry(self) -> None:
         text = self.memory_input.text().strip()

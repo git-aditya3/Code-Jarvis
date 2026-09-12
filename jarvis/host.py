@@ -62,6 +62,13 @@ class Host(Protocol):
     def refresh_memory(self) -> None:
         """Tell the UI that memory changed (used to redraw lists)."""
 
+    def confirm(self, title: str, detail: str, risk: str = "confirm") -> bool:
+        """Ask the user to approve an action. Front-ends that cannot ask must return False
+        (the action layer fails closed when nothing can authorise a risky step)."""
+
+    def ask_text(self, prompt: str, default: str = "") -> str | None:
+        """Ask the user for a piece of text (used by the ``ask_user`` action)."""
+
 
 def open_with_os(target: str) -> bool:
     """Open a URL/path with the platform default handler (no shell involved)."""
@@ -93,12 +100,19 @@ def open_with_os(target: str) -> bool:
 class HeadlessHost:
     """A no-UI host: notifications and speech go to stdout, handy for CLI tests."""
 
-    def __init__(self, verbose: bool = True) -> None:
+    def __init__(self, verbose: bool = True, interactive: bool = False) -> None:
         self.verbose = verbose
+        #: When interactive (the CLI chat), risky actions are approved in the
+        #: terminal; otherwise nothing can approve them and they are refused.
+        self.interactive = interactive
         self.notifications: list[tuple[str, str, str]] = []
         self.spoken: list[str] = []
         self.logs: list[str] = []
         self.opened: list[str] = []
+        self.confirmations: list[tuple[str, str, str]] = []
+        self.prompts: list[str] = []
+        self.confirm_answer: bool = False   # set True to approve actions in tests
+        self.text_answer: str = ""          # what ask_text returns
         self._clipboard = ""
         self._timers: list[tuple[threading.Timer, float, Callable[[], None]]] = []
         self._lock = threading.Lock()
@@ -113,6 +127,35 @@ class HeadlessHost:
         self.spoken.append(text)
         if self.verbose:
             print(f"[speak] {text}")
+
+    def confirm(self, title: str, detail: str, risk: str = "confirm") -> bool:
+        """Nothing can prompt in a headless run, so the answer is whatever the
+        caller configured (default: refuse, which is the safe direction)."""
+        self.confirmations.append((title, detail, risk))
+        if self.interactive:
+            label = "DANGEROUS" if risk == "dangerous" else "needs approval"
+            print(f"\n[{label}] {title}")
+            for line in detail.splitlines():
+                print(f"    {line}")
+            try:
+                reply = input("    approve? [y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                return False
+            return reply in {"y", "yes", "ok", "do it", "sure"}
+        if self.verbose:
+            print(f"[confirm:{risk}] {title} — {detail[:80]}")
+        return bool(self.confirm_answer)
+
+    def ask_text(self, prompt: str, default: str = "") -> str | None:
+        self.prompts.append(prompt)
+        if self.interactive:
+            try:
+                return input(f"\n[question] {prompt}\n    > ")
+            except (EOFError, KeyboardInterrupt):
+                return None
+        if self.verbose:
+            print(f"[ask] {prompt}")
+        return self.text_answer
 
     def log(self, text: str, level: str = "info", meta: dict[str, Any] | None = None) -> None:
         self.logs.append(text)

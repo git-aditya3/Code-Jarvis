@@ -24,11 +24,16 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
+from .actions import ActionRegistry
 from .brain import Brain, Reply
 from .config import PROVIDER_LABELS, VERSION, Settings
+from .control import Controller
+from .control_skills import default_control_skills, maybe_suggest_routine
 from .dev_skills import default_dev_skills
 from .host import Host
 from .memory import Memory
+from .planner import Planner
+from .routines import RoutineRecorder, RoutineRunner, RoutineStore, Timeline
 from .skills import (
     BriefingSkill,
     HelpSkill,
@@ -90,6 +95,32 @@ class Core:
         registry = SkillRegistry()
         for skill in default_skills() + default_dev_skills():
             registry.register(skill)
+
+        # ── computer control ─────────────────────────────────────────────
+        # The controller, action registry, routine store and planner are built
+        # once here and shared through the skill context, so the window, the CLI
+        # and the tests all drive exactly the same machinery.
+        self.control_enabled = bool(settings.get("control_enabled", True))
+        self.controller = Controller(settings) if self.control_enabled else None
+        self.actions: ActionRegistry | None = None
+        self.audit = None
+        self.timeline: Timeline | None = None
+        self.routine_store: RoutineStore | None = None
+        self.recorder: RoutineRecorder | None = None
+        self.routine_runner: RoutineRunner | None = None
+        self.planner: Planner | None = None
+        if self.control_enabled:
+            self.actions = ActionRegistry(settings, memory, host, self.controller, core=self)
+            self.audit = self.actions.audit
+            self.timeline = Timeline(limit=int(settings.get("routine_log_limit", 200) or 200))
+            self.routine_store = RoutineStore(memory)
+            self.recorder = RoutineRecorder(self.timeline)
+            self.actions.recorder = self.recorder
+            self.actions.timeline = self.timeline
+            self.routine_runner = RoutineRunner(self.actions, self.timeline, self.routine_store)
+            self.planner = Planner(self.actions, llm=self._llm_call if self.brain.enabled else None)
+            for skill in default_control_skills():
+                registry.register(skill)
         self.registry = registry
         # help needs the final skill list
         for skill in registry.skills:
@@ -103,6 +134,15 @@ class Core:
             llm=self._llm_call,
             state=self._state(),
         )
+        self.ctx.state.update({
+            "control": self.actions,
+            "controller": self.controller,
+            "routine_store": self.routine_store,
+            "routine_timeline": self.timeline,
+            "routine_recorder": self.recorder,
+            "routine_runner": self.routine_runner,
+            "planner": self.planner,
+        })
         self._lock = threading.Lock()
 
     # ── state shared with skills ─────────────────────────────────────────
@@ -140,6 +180,16 @@ class Core:
         if not cleaned:
             return Response(text="Yes?", speak="Yes?")
 
+        # A control action waiting for a spoken “yes” gets first refusal: the user
+        # is answering the question JARVIS just asked, not starting a new request.
+        pending = self._resolve_pending(cleaned)
+        if pending is not None:
+            pending.duration = time.time() - started
+            self.memory.append_turn("user", cleaned)
+            self.host.log(cleaned, level="user")
+            self._finish(pending, remember)
+            return pending
+
         self.memory.append_turn("user", cleaned)
         self.host.log(cleaned, level="user")
 
@@ -150,6 +200,12 @@ class Core:
             self._finish(response, remember)
             return response
 
+        routine_response = self._maybe_run_routine(cleaned)
+        if routine_response is not None:
+            routine_response.duration = time.time() - started
+            self._finish(routine_response, remember)
+            return routine_response
+
         self.ctx.state["timers_summary"] = self._timer_summary()
         self.ctx.state["cwd"] = str(self._cwd())
 
@@ -157,6 +213,7 @@ class Core:
         if result is not None and result.ok:
             response = Response.from_skill(result, time.time() - started)
             response.provider = "skills"
+            self._maybe_offer_routine(response)
             self._finish(response, remember)
             return response
 
@@ -315,6 +372,44 @@ class Core:
         if command in {"quit", "exit", "bye"}:
             return Response(text="Shutting down. Goodbye.", speak="Goodbye.", ui_action={"quit": True})
 
+        if command in {"actions", "control"}:
+            if self.actions is None:
+                return Response(text="Computer control is disabled in settings.", ok=False)
+            text = self.actions.catalogue()
+            if self.controller is not None:
+                text += "\n\n" + self.controller.report_text()
+            return Response(text=text, ui_action={"focus": "settings"})
+
+        if command in {"audit", "log"}:
+            if self.audit is None:
+                return Response(text="Computer control is disabled in settings.", ok=False)
+            entries = self.audit.tail(15)
+            if not entries:
+                return Response(text=f"Nothing logged yet. The log lives at {self.audit.path}")
+            lines = [f"Action log — {self.audit.path}"]
+            marks = {"done": "✓", "failed": "✗", "refused": "⛔", "declined": "✗", "auto": "·",
+                     "awaiting_voice_confirmation": "…"}
+            for entry in entries:
+                args = ", ".join(f"{key}={value}" for key, value in list((entry.get("args") or {}).items())[:2])
+                lines.append(f"  {marks.get(str(entry.get('outcome')), '·')} {str(entry.get('when', ''))[11:16]} "
+                             f"{entry.get('action')}({args}) — {str(entry.get('message', ''))[:60]}")
+            return Response(text="\n".join(lines))
+
+        if command in {"routines", "macros"}:
+            if self.routine_store is None:
+                return Response(text="Computer control is disabled in settings.", ok=False)
+            routines = self.routine_store.all()
+            if not routines:
+                return Response(
+                    text="No routines saved yet.\n\n"
+                         "• Say “watch what I do”, perform the steps, then “save that as work session”\n"
+                         "• Or let me notice a habit: run the same thing twice and I will offer to save it.",
+                )
+            lines = [f"{len(routines)} routine(s) in {self.memory.path}:"]
+            for routine in routines:
+                lines.append(f"• {routine.summary(self.actions)}")
+            return Response(text="\n".join(lines), ui_action={"refresh_memory": True})
+
         if command in {"settings", "prefs"}:
             return Response(text="Opening Settings.", ui_action={"focus": "settings"})
 
@@ -323,7 +418,89 @@ class Core:
 
         return Response(text=f"Unknown command “/{command}”. Try /help.", ok=False)
 
+    RUN_ROUTINE = re.compile(
+        r"^(?:please\s+)?(?:run|do|start|begin|execute|launch|perform|replay)\s+"
+        r"(?:my\s+|the\s+)?(?P<name>.+?)(?:\s+routine|\s+macro)?(?:\s+again)?$",
+        re.IGNORECASE)
+
+    def _maybe_run_routine(self, text: str) -> Response | None:
+        """“run my work session” → the saved routine, if one goes by that name.
+
+        Routines are the user's own vocabulary, so they get looked up before the
+        general “open/run something” grammar: a saved name always wins, and an
+        unknown name simply falls through to the normal routing.
+        """
+        if self.routine_store is None or self.actions is None:
+            return None
+        match = self.RUN_ROUTINE.match(text.strip())
+        if not match:
+            return None
+        name = match.group("name").strip().strip("“”\"'")
+        if not name:
+            return None
+        routine = self.routine_store.get(name)
+        if routine is None:
+            return None
+        skill = self.registry.find("routine")
+        if skill is None or not hasattr(skill, "run_routine"):
+            return None
+        result = skill.run_routine(routine, self.ctx, self.actions, self.routine_store)
+        return Response(
+            text=result.text, speak=result.speak, ok=result.ok, skill="routine",
+            provider="skills", data=dict(result.data),
+        )
+
+    # ── spoken confirmations ─────────────────────────────────────────────
+    YES_WORDS = {"yes", "yep", "yeah", "ok", "okay", "sure", "do it", "go ahead", "confirm",
+                 "yes please", "please do", "affirmative", "y"}
+    NO_WORDS = {"no", "nope", "stop", "cancel", "don't", "dont", "do not", "never mind",
+                "nevermind", "abort", "no thanks", "n"}
+
+    def _resolve_pending(self, text: str) -> Response | None:
+        """Answer the last “may I?” question when the reply is yes or no."""
+        if self.actions is None or not self.actions.pending:
+            return None
+        pending = self.actions.pending
+        if time.time() - float(pending.get("asked", 0)) > 180:
+            self.actions.pending = None
+            return None
+        answer = re.sub(r"[.!?]+$", "", text.strip().lower())
+        if answer in self.YES_WORDS:
+            self.actions.pending = None
+            result = self.actions.execute(pending["action"], pending["args"],
+                                          source=pending.get("source", "voice"), confirmed=True)
+            return Response(
+                text=result.message,
+                speak=(result.message.splitlines() or ["Done."])[0][:200] if result.ok
+                else "That did not work.",
+                ok=result.ok, skill="control", provider="skills",
+                data={"action": pending["action"], "confirmed": True},
+            )
+        if answer in self.NO_WORDS:
+            self.actions.pending = None
+            self.host.log(f"Cancelled: {pending.get('summary', '')}", level="info")
+            return Response(text=f"Cancelled — nothing happened. ({pending.get('summary', '')})",
+                            speak="Cancelled.", skill="control", provider="skills")
+        # Anything else is a new request; drop the pending action so it cannot
+        # surprise the user later.
+        self.actions.pending = None
+        self.host.log(f"Pending action dropped: {pending.get('summary', '')}", level="info")
+        return None
+
     # ── helpers ──────────────────────────────────────────────────────────
+    def _maybe_offer_routine(self, response: Response) -> None:
+        """After a control action, offer to save it if it has become a habit."""
+        if self.actions is None or self.recorder is None or self.recorder.active:
+            return
+        if not str(response.skill).startswith(("control", "plan")):
+            return
+        try:
+            offer = maybe_suggest_routine(self.ctx)
+        except Exception:
+            return
+        if offer:
+            response.text = response.text.rstrip() + "\n\n— Habit spotted —\n" + offer
+
     def _llm_call(self, question: str, extra_system: str = "") -> Reply:
         return self.brain.ask(
             question,
@@ -392,6 +569,13 @@ class Core:
                         lines["system_full"] = result.text
                 except Exception:
                     pass
+            if self.actions is not None:
+                report = self.controller.report() if self.controller else None
+                ready = [name for name, cap in (report.capabilities.items() if report else []) if cap.available]
+                lines["control"] = (f"{len(self.actions.actions)} actions · "
+                                    f"{len(ready)} capabilities ready"
+                                    + (" · simulation mode" if getattr(self.controller, "simulate", False)
+                                       else ""))
             self._context_cache = {"ts": now, "lines": lines}
         return dict(self._context_cache["lines"])
 

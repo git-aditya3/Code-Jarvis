@@ -70,6 +70,17 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "vosk_model_path": "",
     "mic_index": None,
     "silence_seconds": 1.1,
+    # automation & control
+    "trust_level": "ask_risky",     # ask_all | ask_risky | trusted
+    "allow_dangerous": False,       # destructive actions (delete, kill, power) need this on
+    "dry_run": False,               # rehearse actions without touching the machine
+    "use_trash": True,              # prefer the recycle bin over permanent deletion
+    "routine_watch": True,          # notice repeated commands and offer to save them
+    "routine_suggest_after": 2,     # offer after this many repeats
+    "routine_autosave": False,      # save without asking (off by default, on purpose)
+    "voice_confirm": False,         # ask for risky actions out loud ("say yes to continue")
+    "routine_log_limit": 200,       # remembered commands kept for pattern spotting
+    "shell_timeout": 20,            # seconds before a command is abandoned
     # interface
     "always_on_top": True,
     "opacity": 0.97,
