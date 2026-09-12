@@ -478,7 +478,7 @@ aloud, and stored in conversation history for the next turn's context.
 ## Tests and linting
 
 ```bash
-python -m unittest discover -s tests -v    # 155 tests, no network, no real home dir touched
+python -m unittest discover -s tests -v    # 163 tests, no network, no real home dir touched
 ruff check .                               # configured in pyproject.toml
 ```
 
@@ -503,7 +503,8 @@ python tools/audit_examples.py --strict   # non-zero exit if any phrase reaches 
 
 It runs every action's example phrase through the real router in dry-run mode and reports whether
 it reached its action, was answered by a skill, or fell through — the same check the test suite
-makes, but readable.
+makes, but readable. As of today: **70 of 76** phrases reach their own action and the other six are
+answered by an equivalent skill.
 
 ## Troubleshooting
 
