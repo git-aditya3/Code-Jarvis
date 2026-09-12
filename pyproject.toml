@@ -67,7 +67,7 @@ packages = ["jarvis", "jarvis.ui"]
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-exclude = [".git", "__pycache__", "build", "dist", ".venv", "code assistance.py"]
+exclude = [".git", "__pycache__", "build", "dist", ".venv", "code assistance.py", "tools/preview_server.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF"]
@@ -96,6 +96,7 @@ ignore = [
 # tests and the launcher adjust sys.path / env before importing jarvis
 "tests/*" = ["S101"]
 "run_jarvis.py" = ["E402"]
+"tools/*" = ["E402"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["jarvis"]

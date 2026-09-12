@@ -78,6 +78,10 @@ python run_jarvis.py --ask "what is 18% of 2400"
 **Requirements:** Python 3.10+. Nothing else is mandatory — JARVIS degrades gracefully and
 `--doctor` tells you exactly which optional package unlocks which feature.
 
+> **Want to see it before installing anything?** `python tools/preview_server.py` serves a browser
+> preview of the interface: the live HUD animation rendered from the real Qt widget, the actual
+> skill router answering your questions, and screenshots of the desktop app.
+
 ## Talking to it
 
 | Shortcut | Action |
@@ -219,6 +223,7 @@ python run_jarvis.py --skills            # list skills
 python run_jarvis.py --doctor            # dependency + voice diagnostics
 python run_jarvis.py --provider ollama --model qwen2.5    # one-off overrides
 python run_jarvis.py --no-voice --data-dir ./sandbox      # quiet, isolated run
+python tools/preview_server.py --port 8077               # browser preview of the interface
 ```
 
 ## Where your data lives
